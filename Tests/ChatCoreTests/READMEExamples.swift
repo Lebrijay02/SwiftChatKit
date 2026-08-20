@@ -177,3 +177,91 @@ struct TruncatingCompressor: ContextCompressor {
     func compress(_ text: String, toolName: String) async -> String { String(text.prefix(threshold)) }
     func retrieve(handle: String, query: String?) async throws -> String { "" }
 }
+
+// --- Questions ---
+@MainActor
+func readme_questions() async {
+    let questions = QuestionService()
+    let parsed = QuestionService.parse(["questions": [
+        ["question": "Which backend?", "header": "Backend", "multiSelect": false,
+         "options": [["label": "Gemini", "description": "Vertex AI"]]],
+    ]])
+    if let parsed {
+        let answers = await questions.request(parsed)
+        _ = answers?["Which backend?"]
+    }
+    _ = questions.pending
+    questions.resolve(["Which backend?": "Gemini"])
+    questions.cancelPending()
+    _ = QuestionService.maxQuestions
+    _ = UserQuestion(question: "Proceed?", header: "Scope",
+                     options: [UserQuestionOption(label: "Yes", description: "")],
+                     multiSelect: true)
+}
+
+// --- Skills ---
+@MainActor
+func readme_skills(projectURL: URL) throws {
+    let skills = SkillsService(configuration: .claudeCompatible)
+    _ = SkillsService(configuration: .disabled)
+    _ = SkillsService(configuration: SkillsConfiguration(
+        globalDirectory: URL(fileURLWithPath: "/opt/skills"),
+        projectRelativePath: ".myapp/skills"))
+
+    for skill in skills.refresh(workingDirectory: projectURL) {
+        _ = (skill.id, skill.name, skill.description, skill.scope, skill.directory)
+    }
+    if let skill = skills.skill(named: "my-skill") {
+        _ = try skills.skillBody(skill)
+    }
+    _ = skills.execute(ToolCall(name: SkillsService.toolName, arguments: ["name": "my-skill"]))
+    _ = (skills.skillsText(), skills.skillsHash(), SkillsService.declaration)
+    _ = SkillsService.parseFrontmatter("---\nname: x\n---\n")
+    _ = SkillsService.stripFrontmatter("---\nname: x\n---\nBody")
+}
+
+// --- History ---
+func readme_history(messages: [ChatMessage]) {
+    let store = ChatHistoryStore.applicationSupport("MyApp")
+    _ = ChatHistoryStore(directory: URL(fileURLWithPath: "/tmp/sessions"))
+
+    var session = StoredSession(title: ChatHistoryStore.derivedTitle(from: messages),
+                                messages: messages.map(StoredMessage.init(from:)),
+                                usage: TokenUsage(prompt: 10, completion: 5, total: 15),
+                                workingDirectoryPath: "/tmp",
+                                modelName: "some-model")
+    session.updatedAt = Date()
+    store.save(session)
+
+    for saved in store.loadAll() {
+        _ = (saved.id, saved.title, saved.updatedAt, saved.usage, saved.workingDirectoryPath)
+    }
+    if let loaded = store.load(session.id) {
+        _ = loaded.messages.filter(\.isReplayable).map { $0.toChatMessage() }
+        _ = loaded.messages.first?.attachmentNames
+    }
+    store.delete(session.id)
+    _ = store.directory
+}
+
+// --- System prompt ---
+func readme_prompt() {
+    var persona = ChatPersona.default
+    persona.identity = "You are Acme Helper, Acme's assistant for the Acme SDK."
+    persona.additionalBlocks = ["\n# House rules\nAlways prefer the Acme SDK."]
+    _ = ChatPersona.minimal
+    _ = ChatPersona(identity: "You answer questions.", code: nil,
+                    fileOperations: nil, runningCommands: nil, taskManagement: nil)
+
+    let context = SystemPromptContext(
+        persona: persona,
+        planMode: false,
+        skillsText: "",
+        compressorInstruction: "",
+        projectContext: "Use tabs.",
+        projectContextTitle: "Project instructions (AGENTS.md)",
+        additionalSections: ["# Component catalog\n- Button"])
+
+    _ = SystemPromptBuilder.build(context)
+    _ = SystemPromptBuilder.fingerprint(context)
+}

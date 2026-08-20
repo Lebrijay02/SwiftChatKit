@@ -23,9 +23,12 @@ designed but **not yet implemented** — the API previews for them are marked
 | Markdown parser | `ChatCore` | ✅ Available |
 | `ChatValue`, tool declarations, schemas | `ChatCore` | ✅ Available |
 | `ChatMessage`, `Attachment` | `ChatCore` | ✅ Available |
-| `PermissionService` | `ChatCore` | ✅ Available |
+| `PermissionService`, `QuestionService` | `ChatCore` | ✅ Available |
 | Protocol seams (`ChatBackend`, `ToolProvider`, …) | `ChatCore` | ✅ Available |
-| Skills, slash commands, history store, prompts | `ChatCore` | ⬜ Not built yet |
+| Agent Skills discovery | `ChatCore` | ✅ Available |
+| Transcript persistence | `ChatCore` | ✅ Available |
+| System-prompt assembly | `ChatCore` | ✅ Available |
+| Slash commands | `ChatCore` | ⬜ Not built yet |
 | `ChatSession` agent loop | `ChatCore` | ⬜ Not built yet |
 | Gemini backend | `ChatGemini` | ⬜ Not built yet |
 | File + shell tool providers | `ChatTools` | ⬜ Not built yet |
@@ -312,6 +315,170 @@ from read-only plan mode.
 
 ---
 
+## Asking the user
+
+The counterpart to permissions: when the model needs a decision it cannot make
+without guessing, it asks. A wrong guess costs a whole turn of wasted work.
+
+```swift
+let questions = QuestionService()
+
+// Built from the `askUser` tool's arguments.
+if let parsed = QuestionService.parse(call.arguments) {
+    // Suspends until the host submits the card.
+    let answers = await questions.request(parsed)
+    let choice = answers?["Which backend?"]   // nil = the user declined
+}
+```
+
+`QuestionService` is `@MainActor @Observable`, so drive it the same way as
+permissions — read `pending`, call `resolve(_:)` with answers keyed by question
+text, or `cancelPending()` when streaming stops.
+
+```swift
+UserQuestion(question: "Which backend?",
+             header: "Backend",                              // short category label
+             options: [UserQuestionOption(label: "Gemini",
+                                          description: "Vertex AI")],
+             multiSelect: false)
+```
+
+`parse` is defensive by design. It caps at `QuestionService.maxQuestions` (4 —
+beyond that it stops being a clarification and becomes an interrogation), skips
+options missing a label while keeping the question, and returns `nil` when
+nothing usable remains so the loop can report a tool error instead of showing an
+empty card.
+
+## Agent Skills
+
+A skill is a folder with a `SKILL.md` — YAML frontmatter for `name` and
+`description`, Markdown body for the instructions. The model sees only the
+name and description in the system prompt and loads the body on demand via the
+`useSkill` tool. That progressive disclosure is the point: a dozen installed
+skills would otherwise consume the context window before the first turn.
+
+```swift
+let skills = SkillsService(configuration: .claudeCompatible)
+skills.refresh(workingDirectory: projectURL)
+
+skills.skills            // [AgentSkill] — name, description, scope, directory
+skills.skill(named: "code-review")   // case-insensitive
+try skills.skillBody(skill)          // SKILL.md with frontmatter stripped
+```
+
+`.claudeCompatible` searches `~/.claude/skills` and `<project>/.claude/skills`.
+Local skills shadow global ones of the same name, so a project can override a
+machine-wide skill. Point it anywhere, or turn it off:
+
+```swift
+SkillsConfiguration(globalDirectory: URL(fileURLWithPath: "/opt/skills"),
+                    projectRelativePath: ".myapp/skills")
+SkillsConfiguration.disabled
+```
+
+Handling the tool call is one line — the result carries the instructions plus
+the skill's folder path, so the model can read the support files a skill
+references:
+
+```swift
+let result = skills.execute(call)
+// payload: ["name": …, "directory": …, "instructions": …]
+```
+
+A call naming a skill that isn't installed fails with the list of ones that are,
+so the model can self-correct rather than retrying blindly.
+
+For the system prompt: `skillsText()` renders the listing block, and
+`skillsHash()` is a cheap fingerprint for detecting changes without
+regenerating it.
+
+Symlinked skill folders are resolved before the directory check — installers
+commonly link `~/.claude/skills/<name>` at a store elsewhere.
+
+## Persisting transcripts
+
+One JSON file per session, written atomically so an interrupted save cannot
+truncate an existing transcript.
+
+```swift
+let store = ChatHistoryStore.applicationSupport("MyApp")
+// or ChatHistoryStore(directory: someURL)
+
+let session = StoredSession(
+    title: ChatHistoryStore.derivedTitle(from: messages),
+    messages: messages.map(StoredMessage.init(from:)),
+    usage: TokenUsage(prompt: 10, completion: 5, total: 15),
+    workingDirectoryPath: projectURL.path,
+    modelName: "some-model")
+
+store.save(session)
+store.loadAll()          // newest first; corrupt files are skipped, not fatal
+store.load(session.id)
+store.delete(session.id)
+```
+
+`StoredSession` is the serialized form; the live engine type will be
+`ChatSession`. Restoring is `loaded.messages.map { $0.toChatMessage() }`.
+
+Two behaviours to know:
+
+- **Attachment bytes are not persisted.** Inlining image and PDF data would
+  bloat every transcript by megabytes. Filenames survive in `attachmentNames`,
+  so the UI can still show what was sent.
+- **`isReplayable` tells you whether a tool message can be rebuilt.** A
+  `.toolCall` without `rawArguments` cannot become a real function-call part,
+  and replay should skip it rather than fabricate one.
+
+`derivedTitle(from:)` takes the first non-empty line of the first user message,
+truncated to 60 characters, falling back to `"New chat"`.
+
+## Building the system prompt
+
+The persona is a set of independent blocks rather than one blob, because most of
+them are conditional and a host swapping the identity shouldn't have to restate
+the behavioural guidance it wants to keep.
+
+```swift
+var persona = ChatPersona.default
+persona.identity = "You are Acme Helper, Acme's assistant for the Acme SDK."
+persona.additionalBlocks = ["\n# House rules\nAlways prefer the Acme SDK."]
+
+let prompt = SystemPromptBuilder.build(SystemPromptContext(
+    persona: persona,
+    planMode: false,
+    skillsText: skills.skillsText(),
+    compressorInstruction: compressor?.systemInstruction ?? "",
+    projectContext: agentsMarkdown,
+    projectContextTitle: "Project instructions (AGENTS.md)",
+    additionalSections: ["# Component catalog\n- Button"]))
+```
+
+Blocks: `identity`, `communication`, `code`, `fileOperations`,
+`runningCommands`, `taskManagement`, `doingTasks`. All but the first two are
+optional — set one to `nil` and it disappears. Drop the tool blocks when you
+haven't installed the matching providers, so the prompt never advertises tools
+that don't exist.
+
+```swift
+ChatPersona.default   // every block — a general-purpose coding assistant
+ChatPersona.minimal   // identity + communication only
+```
+
+**The defaults ship no host-specific identity.** A test asserts the assembled
+default prompt contains no product, vendor, IDE or framework name — that
+neutrality is the package's whole premise, so it's enforced rather than trusted.
+
+Order is deliberate: identity and standing behaviour, then mode overrides
+(plan mode, compression), then skills and host sections, then project context
+**last** so it outranks the defaults it contradicts.
+
+`SystemPromptBuilder.fingerprint(_:)` is a cheap identity for a built prompt.
+Compare it against the value baked into the current model to decide whether a
+rebuild is needed, instead of reassembling and re-uploading the prompt every
+turn.
+
+---
+
 ## Implementing the seams
 
 Everything host-specific plugs in here. These protocols exist and compile today;
@@ -512,9 +679,9 @@ swift build
 swift test
 ```
 
-Currently 53 tests across 6 suites. The Markdown suites are ported verbatim from
-the originating app — that equivalence is the primary regression signal for the
-parser.
+Currently 84 tests across 11 suites. The Markdown suites are ported verbatim
+from the originating app — that equivalence is the primary regression signal for
+the parser.
 
 ## Known limitations
 
@@ -524,6 +691,8 @@ parser.
   replayed to a backend as real tool turns.
 - `ToolSchema` covers a JSON-Schema subset only; composition keywords are not
   represented.
+- Skill frontmatter parsing handles single-line `key: value` pairs, quoted
+  values and simple folded scalars — it is not a general YAML parser.
 - `ChatCore` is platform-agnostic, but the built-in shell and stdio-transport
   tools will be macOS-only when they land — on iOS those targets compile to an
   empty provider list.

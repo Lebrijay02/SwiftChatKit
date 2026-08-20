@@ -65,7 +65,7 @@ public struct TurnInput: Equatable, Sendable {
     }
 }
 
-public struct TokenUsage: Equatable, Sendable {
+public struct TokenUsage: Equatable, Sendable, Codable {
     public let prompt: Int
     public let completion: Int
     public let total: Int
