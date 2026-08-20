@@ -76,27 +76,66 @@ public protocol ChatTelemetry: Sendable {
 
 // MARK: - File system
 
+/// One find-and-replace within a file. A list of these is applied in order, so
+/// a later edit sees the result of an earlier one.
+public struct FileEdit: Equatable, Sendable {
+    public let oldText: String
+    public let newText: String
+
+    public init(oldText: String, newText: String) {
+        self.oldText = oldText
+        self.newText = newText
+    }
+}
+
+/// What a content search should return. Paths alone are usually enough and are
+/// far cheaper in context than the matching lines.
+public enum GrepOutputMode: String, Equatable, Sendable {
+    case filesWithMatches = "files_with_matches"
+    case content
+    case count
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "content": self = .content
+        case "count": self = .count
+        default: self = .filesWithMatches
+        }
+    }
+}
+
 /// The operations the built-in file tools need. Abstracted so a host can back
 /// them with a sandboxed root, a virtual project, or a remote workspace instead
 /// of the local disk.
+///
+/// Paths are relative to `currentDirectory()` unless absolute. The tools never
+/// pass a base directory — a model repeating a stale one back is a whole class
+/// of error that not having the parameter removes.
 public protocol FileSystemProviding: Sendable {
 
     func currentDirectory() async -> URL
+    /// Called when the session's working directory changes.
+    func setCurrentDirectory(_ url: URL) async
 
+    /// Numbered lines, `cat -n` style. `offset` is 0-indexed.
     func readText(at path: String, offset: Int?, limit: Int?) async throws -> String
     func readData(at path: String) async throws -> (data: Data, mimeType: String)
 
     func write(_ contents: String, to path: String) async throws
-    /// Replaces `find` with `replace`. Throws when `find` is absent or, unless
-    /// `replaceAll`, when it appears more than once — an ambiguous edit is a bug,
-    /// not something to guess at.
-    func edit(path: String, find: String, replace: String, replaceAll: Bool) async throws -> String
+    /// Applies `edits` in order and returns a diff of what changed. Throws when
+    /// any `oldText` is absent — an edit that silently matched nothing is a bug,
+    /// not something to report as success. `dryRun` returns the diff unwritten.
+    func edit(path: String, edits: [FileEdit], dryRun: Bool) async throws -> String
 
     func createDirectory(at path: String) async throws
-    func list(at path: String, withSizes: Bool) async throws -> String
+    func list(at path: String, withSizes: Bool, sortBySize: Bool) async throws -> String
     func move(from: String, to: String) async throws
     func info(at path: String) async throws -> [String: ChatValue]
 
     func glob(pattern: String, in path: String?) async throws -> [String]
-    func grep(pattern: String, in path: String?, filePattern: String?) async throws -> String
+    func grep(pattern: String,
+              in path: String?,
+              filePattern: String?,
+              caseInsensitive: Bool,
+              outputMode: GrepOutputMode) async throws -> [String: ChatValue]
 }

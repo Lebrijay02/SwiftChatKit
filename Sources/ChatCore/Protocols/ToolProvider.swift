@@ -34,6 +34,11 @@ public protocol ToolProvider: AnyObject, Sendable {
     /// Tools that must be blocked in plan mode because they mutate state.
     var mutatingToolNames: Set<String> { get }
 
+    /// Told when the session's working directory changes, and once at session
+    /// init. Providers that resolve paths or spawn processes need to follow it;
+    /// the default does nothing.
+    func workingDirectoryChanged(to url: URL?) async
+
     /// Bumped when `declarations` changes, so the session knows to rebuild the
     /// model. Constant for providers with a fixed tool list.
     var declarationsVersion: Int { get async }
@@ -54,6 +59,8 @@ public extension ToolProvider {
     var mutatingToolNames: Set<String> { [] }
 
     var declarationsVersion: Int { get async { 0 } }
+
+    func workingDirectoryChanged(to url: URL?) async {}
 }
 
 // MARK: - Generic approval

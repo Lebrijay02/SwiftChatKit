@@ -13,10 +13,9 @@ and context compression all arrive through protocols the host conforms to.
 ## ⚠️ Status: under construction
 
 This package is being built incrementally. **Only the pieces listed under
-"Available today" exist and compile.** The `ChatSession` engine, the Gemini
-backend, the built-in file/shell tools, MCP and the SwiftUI renderer are
-designed but **not yet implemented** — the API previews for them are marked
-`Not built yet` and will not compile.
+"Available today" exist and compile.** MCP, the SwiftUI renderer and slash
+commands are designed but **not yet implemented** — the API previews for them
+are marked `Not built yet` and will not compile.
 
 | Component | Module | Status |
 |---|---|---|
@@ -32,13 +31,14 @@ designed but **not yet implemented** — the API previews for them are marked
 | Slash commands | `ChatCore` | ⬜ Not built yet |
 | `ChatSession` agent loop | `ChatCore` | ✅ Available |
 | Gemini backend | `ChatGemini` | ✅ Available |
-| File + shell tool providers | `ChatTools` | ⬜ Not built yet |
+| File + shell tool providers | `ChatTools` | ✅ Available |
 | MCP client and manager | `ChatMCP` | ⬜ Not built yet |
 | SwiftUI Markdown renderer, agent cards | `ChatUI` | ⬜ Not built yet |
 
 Every code sample in the "Available today" sections is compile-checked by
-`Tests/ChatCoreTests/READMEExamples.swift` and
-`Tests/ChatGeminiTests/READMEExamples.swift`, which import the modules the way a
+`Tests/ChatCoreTests/READMEExamples.swift`,
+`Tests/ChatGeminiTests/READMEExamples.swift` and
+`Tests/ChatToolsTests/READMEExamples.swift`, which import the modules the way a
 consumer does. If a sample stops compiling, the build breaks.
 
 ---
@@ -670,6 +670,90 @@ unanswered call (it would make the next send invalid).
 
 ---
 
+## Built-in tools
+
+`ChatTools` ships the file and shell providers. Both are plain `ToolProvider`s —
+you list them in the configuration, and nothing else changes.
+
+```swift
+import ChatTools
+
+let session = ChatSession(configuration: .init(
+    backend: backend,
+    toolProviders: [
+        FileToolProvider(fileSystem: LocalFileSystem(root: projectURL)),
+        ShellToolProvider()
+    ],
+    workingDirectory: projectURL))
+```
+
+Neither provider takes a directory per call. They follow the session's
+`workingDirectory`, which is pushed to every provider at init and again whenever
+it changes — a model repeating a stale path back at you is a whole class of
+error that not having the parameter removes. `getCurrentDirectory` stays, so the
+model can still report and build absolute paths.
+
+### The file tools
+
+Thirteen tools over `FileSystemProviding`:
+
+| | |
+|---|---|
+| Read | `getCurrentDirectory`, `readTextFile`, `readMediaFile`, `readMultipleFiles` |
+| Search | `globFiles`, `grepFiles` |
+| Inspect | `listDirectory`, `listDirectoryWithSizes`, `getFileInfo` |
+| Write | `writeFile`, `editFile`, `createDirectory`, `moveFile` |
+
+The nine read tools are in `FileToolProvider.readOnlyNames` and auto-allow
+themselves; the four write tools are in `mutatingNames`, so they prompt for
+approval and are blocked outright in plan mode.
+
+Behaviour worth knowing:
+
+- `readTextFile` returns `cat -n` numbered lines, and `offset`/`limit` page
+  through a large file while keeping absolute line numbers.
+- `editFile` applies its edits in order and **throws if any `oldText` is
+  absent** — an edit that silently matched nothing would leave the model
+  building its next change on a file state that never existed. The whole batch
+  is then unapplied. Its approval card shows the real diff, computed with a dry
+  run, rather than the raw arguments.
+- `moveFile` never overwrites an existing destination.
+- `readMultipleFiles` reports a bad path inline instead of failing the batch.
+- `grepFiles` defaults to `files_with_matches`, which costs far less context
+  than returning the matching lines.
+
+`LocalFileSystem` is the default conformer. It skips hidden files and the usual
+noise directories (`.git`, `node_modules`, `.build`, `DerivedData`, …) when
+walking, configurable via `excludedNames`. Pass `securityScoped: true` when the
+root came from a bookmark or an open panel and the host is sandboxed — every
+operation is then wrapped in a balanced start/stop access pair.
+
+Globs are matched properly, not by stripping the wildcards and testing
+`contains`: `*`, `**`, `?` and `[a-z]` classes all mean what they mean, `*`
+stops at a path separator and `**` does not, and a pattern with no slash matches
+at any depth. `GlobPattern.matches(_:pattern:)` is public if you want it.
+
+### The shell tool
+
+`ShellToolProvider` exposes a single `runCommand`, macOS-only. It is never
+auto-allowed and always counts as mutating — no shell command is safe enough to
+run unprompted.
+
+```swift
+ShellToolProvider(shell: "/bin/zsh", timeout: 120, outputLimit: 30_000)
+```
+
+A command past the deadline gets `SIGTERM`, then `SIGKILL` a second later, and
+comes back with `timedOut: true`. Output beyond `outputLimit` keeps the head and
+the tail and drops the middle — a build log's first error and its final summary
+both matter. stdout and stderr are drained concurrently with the wait, so a
+command that fills the 64 KB pipe buffer does not deadlock.
+
+Non-zero exits are returned as data, not as errors: the model should read the
+exit code and recover, not have the turn fail.
+
+---
+
 ## Implementing the seams
 
 Everything host-specific plugs in here. These protocols exist and compile today;
@@ -806,22 +890,21 @@ throwing. A compression outage should degrade context efficiency, not the chat.
 
 ### `FileSystemProviding` — back the built-in file tools
 
-Abstracted so you can point the file tools at a sandboxed root, a virtual
-project, or a remote workspace instead of the local disk. Covers
-`currentDirectory`, `readText`/`readData`, `write`/`edit`, `createDirectory`,
-`list`, `move`, `info`, `glob` and `grep`.
+`LocalFileSystem` is the default, but conform your own type to point the file
+tools at a virtual project, an in-memory fixture, or a remote workspace. Covers
+`currentDirectory`/`setCurrentDirectory`, `readText`/`readData`,
+`write`/`edit`, `createDirectory`, `list`, `move`, `info`, `glob` and `grep`.
 
-`edit` throws when the target string is absent, or — unless `replaceAll` — when
-it appears more than once. An ambiguous edit is a bug, not something to guess at.
+Paths arrive relative to `currentDirectory()` unless absolute — resolving them
+is the conformer's job. `edit` must throw when an `oldText` is absent rather
+than reporting a success that changed nothing.
 
 ---
 
 # Not built yet
 
-Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`), the
-built-in file and shell tool providers (`ChatTools`), the MCP client
-(`ChatMCP`), and the SwiftUI renderer and agent cards (`ChatUI`). Until
-`ChatTools` lands, a host supplies its own `ToolProvider` for file access.
+Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`), the MCP
+client (`ChatMCP`), and the SwiftUI renderer and agent cards (`ChatUI`).
 
 ---
 
@@ -832,7 +915,7 @@ swift build
 swift test
 ```
 
-Currently 135 tests across 21 suites. The Markdown suites are ported verbatim
+Currently 197 tests across 31 suites. The Markdown suites are ported verbatim
 from the originating app — that equivalence is the primary regression signal for
 the parser.
 

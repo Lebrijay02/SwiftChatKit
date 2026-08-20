@@ -49,6 +49,7 @@ public final class ChatSession {
             guard workingDirectory != oldValue else { return }
             skills.refresh(workingDirectory: workingDirectory)
             configuration.workingDirectory = workingDirectory
+            notifyProvidersOfWorkingDirectory()
         }
     }
 
@@ -88,6 +89,17 @@ public final class ChatSession {
         questions = QuestionService()
         skills = SkillsService(configuration: configuration.skills)
         skills.refresh(workingDirectory: configuration.workingDirectory)
+        notifyProvidersOfWorkingDirectory()
+    }
+
+    private func notifyProvidersOfWorkingDirectory() {
+        let url = workingDirectory
+        let providers = configuration.toolProviders
+        Task {
+            for provider in providers {
+                await provider.workingDirectoryChanged(to: url)
+            }
+        }
     }
 
     // MARK: - Sending
