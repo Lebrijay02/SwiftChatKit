@@ -30,14 +30,15 @@ designed but **not yet implemented** — the API previews for them are marked
 | System-prompt assembly | `ChatCore` | ✅ Available |
 | Slash commands | `ChatCore` | ⬜ Not built yet |
 | `ChatSession` agent loop | `ChatCore` | ⬜ Not built yet |
-| Gemini backend | `ChatGemini` | ⬜ Not built yet |
+| Gemini backend | `ChatGemini` | ✅ Available |
 | File + shell tool providers | `ChatTools` | ⬜ Not built yet |
 | MCP client and manager | `ChatMCP` | ⬜ Not built yet |
 | SwiftUI Markdown renderer, agent cards | `ChatUI` | ⬜ Not built yet |
 
 Every code sample in the "Available today" sections is compile-checked by
-`Tests/ChatCoreTests/READMEExamples.swift`. If a sample stops compiling, the
-build breaks.
+`Tests/ChatCoreTests/READMEExamples.swift` and
+`Tests/ChatGeminiTests/READMEExamples.swift`, which import the modules the way a
+consumer does. If a sample stops compiling, the build breaks.
 
 ---
 
@@ -48,16 +49,22 @@ build breaks.
 | Swift toolchain | **6.2** or later (`swift-tools-version: 6.2`) |
 | Language mode | **Swift 6** — strict concurrency is on |
 | Platforms | macOS 14+, iOS 17+ |
-| Dependencies | none for `ChatCore` |
+| Dependencies | none for `ChatCore`; `firebase-ios-sdk` 12.14+ for `ChatGemini` |
 
 Strict concurrency is not optional here. Types that cross the tool boundary
 (`ChatValue`, `ChatMessage`, `ToolDeclaration`, `ToolCall`, `ToolResult`,
 `Attachment`) are all `Sendable`; `ToolProvider` and `ChatBackend` are `Sendable`
 protocols, so conformers are typically `actor`s or `@MainActor` classes.
 
-Planned per-module dependencies, once those modules land: `ChatGemini` will
-require `firebase-ios-sdk` (`FirebaseAILogic`) and `ChatMCP` will require
-`modelcontextprotocol/swift-sdk`. Neither will affect `ChatCore` consumers.
+Dependencies are per-module. `ChatGemini` pulls in `firebase-ios-sdk`
+(`FirebaseAILogic`); `ChatMCP` will pull in `modelcontextprotocol/swift-sdk`
+when it lands. Neither affects consumers of the `SwiftChatKitCore` product,
+which is `ChatCore` alone with no external dependencies.
+
+Using `ChatGemini` additionally requires a Firebase project with Vertex AI
+enabled, a `GoogleService-Info.plist` in the host app, and a
+`FirebaseApp.configure()` call before the first turn — the package does not
+configure Firebase for you, because the app owns that lifecycle.
 
 ## Installation
 
@@ -68,7 +75,10 @@ dependencies: [
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
+        // Engine + Gemini backend.
         .product(name: "SwiftChatKit", package: "SwiftChatKit"),
+        // Or, bringing your own backend, the dependency-free core alone:
+        // .product(name: "SwiftChatKitCore", package: "SwiftChatKit"),
     ])
 ]
 ```
@@ -479,6 +489,66 @@ turn.
 
 ---
 
+## The Gemini backend
+
+`ChatGemini` is the one shipped `ChatBackend`, over Firebase AI Logic's Vertex AI
+path. It is a thin translation layer: it owns every `FirebaseAILogic` type so
+nothing above it has to.
+
+```swift
+import ChatCore
+import ChatGemini
+
+let backend = GeminiBackend(GeminiBackendConfig(
+    model: .gemini3_5Flash,
+    location: "global",          // Vertex region; "global" routes to nearest capacity
+    enableGoogleSearch: true))   // offers the built-in search tool alongside your functions
+
+await backend.configure(
+    systemInstruction: SystemPromptBuilder.build(SystemPromptContext()),
+    tools: myProvider.declarations,
+    history: [])
+
+for try await chunk in backend.stream(.message("What changed in this file?")) {
+    // .text / .toolCall / .usage / .finish, exactly as the protocol describes
+}
+```
+
+Firebase must already be configured — call `FirebaseApp.configure()` in your app
+before the first turn.
+
+### Models
+
+`GeminiModel` is a `RawRepresentable` struct rather than an enum, because Google
+ships model IDs faster than this package ships releases and a host must be able
+to pass one that did not exist at compile time.
+
+```swift
+GeminiModel.known            // the seven IDs with curated display names
+GeminiModel.gemini3_5Flash.displayName   // "Gemini 3.5 Flash"
+GeminiModel("gemini-9-ultra-preview").displayName  // "Gemini 9 Ultra" — derived
+await backend.setModel(.gemini2_5Pro)    // swaps models, carrying history across
+```
+
+### What the translation layer guarantees
+
+- `ChatValue` ↔ `JSONValue` round-trips every case. Booleans stay booleans —
+  a `true` degrading to `1` would break every boolean tool argument.
+- `ToolSchema` maps onto the schema types Vertex accepts (`.number` becomes the
+  SDK's `.double`); `optional:` is emitted as "everything not listed is
+  `required`", which is the direction the wire format expresses it.
+- Reasoning parts (`TextPart.isThought`) are dropped, never yielded as `.text`.
+- Tool *results* are sent with role `"user"` whatever produced them, because
+  Vertex AI rejects any other role on an incoming turn.
+- A call arriving without an id gets a synthesized one, so parallel calls still
+  pair back to their responses.
+- Empty text parts are dropped rather than sent — Vertex rejects them.
+
+These are the conversion tests, not prose: `Tests/ChatGeminiTests` covers each
+point above without a network or a Firebase project.
+
+---
+
 ## Implementing the seams
 
 Everything host-specific plugs in here. These protocols exist and compile today;
@@ -679,7 +749,7 @@ swift build
 swift test
 ```
 
-Currently 84 tests across 11 suites. The Markdown suites are ported verbatim
+Currently 104 tests across 15 suites. The Markdown suites are ported verbatim
 from the originating app — that equivalence is the primary regression signal for
 the parser.
 
