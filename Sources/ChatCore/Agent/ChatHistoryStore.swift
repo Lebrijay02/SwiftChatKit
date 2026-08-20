@@ -99,7 +99,7 @@ public struct StoredMessage: Codable, Equatable, Sendable {
         case .user:       messageRole = .user
         case .assistant:  messageRole = .assistant
         case .toolCall:   messageRole = .toolCall(toolName: toolName ?? "unknown")
-        case .toolResult: messageRole = .toolResult
+        case .toolResult: messageRole = .toolResult(toolName: toolName ?? "unknown")
         }
         return ChatMessage(role: messageRole,
                            content: content,

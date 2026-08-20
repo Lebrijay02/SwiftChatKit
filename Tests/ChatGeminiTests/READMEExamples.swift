@@ -38,3 +38,54 @@ private func readmeGeminiBackend() async throws {
     _ = await backend.history
     _ = await backend.modelName
 }
+
+// MARK: - Quickstart
+
+private func notifyUser(_ message: String) {}
+
+private final class MyToolProvider: ToolProvider {
+    var declarations: [ToolDeclaration] {
+        get async { [ToolDeclaration(name: "myTool", description: "Does the thing.")] }
+    }
+    func execute(_ call: ToolCall) async -> ToolResult { .success(call, ["ok": .bool(true)]) }
+}
+
+private struct MyTelemetry: ChatTelemetry {
+    func record(_ metrics: TurnMetrics) async {}
+}
+
+@MainActor
+private func readmeQuickstart(projectURL: URL, data: Data, storedSession: StoredSession) {
+    let session = ChatSession(configuration: ChatSessionConfiguration(
+        backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash)),
+        toolProviders: [MyToolProvider()],
+        persona: .default,
+        workingDirectory: projectURL,
+        skills: .claudeCompatible,
+        maxTurns: 100,
+        historyStore: .applicationSupport("MyApp"),
+        telemetry: MyTelemetry(),
+        onRunFinished: { outcome in
+            if outcome == .completed { notifyUser("Your request is ready.") }
+        }))
+
+    session.send("Refactor this view", attachments: [.image(data, mimeType: "image/png")])
+    session.stop()
+
+    _ = session.messages
+    _ = session.isStreaming
+    _ = session.error
+    _ = session.todos
+    _ = session.usage
+    _ = session.lastTurnUsage
+    _ = session.planMode
+    _ = session.permissions.pending
+    _ = session.questions.pending
+
+    session.setPlanMode(true)
+    session.regenerate()
+    session.newChat()
+    session.load(storedSession)
+    session.save()
+    session.workingDirectory = projectURL
+}

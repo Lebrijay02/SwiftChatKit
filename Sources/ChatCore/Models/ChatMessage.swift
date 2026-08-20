@@ -13,11 +13,16 @@ public enum MessageRole: Equatable, Sendable {
     case user
     case assistant
     case toolCall(toolName: String)
-    case toolResult
+    /// Carries the tool's name too: a result has to be replayed to the backend
+    /// as a response to a *named* function, and the call it answers may already
+    /// have scrolled out of whatever slice of the transcript is being rebuilt.
+    case toolResult(toolName: String)
 
     public var toolName: String? {
-        if case .toolCall(let name) = self { return name }
-        return nil
+        switch self {
+        case .toolCall(let name), .toolResult(let name): return name
+        case .user, .assistant: return nil
+        }
     }
 }
 
@@ -105,7 +110,7 @@ public extension ChatMessage {
     }
 
     static func toolResult(_ result: ToolResult) -> ChatMessage {
-        ChatMessage(role: .toolResult,
+        ChatMessage(role: .toolResult(toolName: result.name),
                     content: ChatValue.object(result.payload).jsonString(),
                     completedAt: Date(),
                     status: result.errorMessage == nil ? .completed : .incomplete,

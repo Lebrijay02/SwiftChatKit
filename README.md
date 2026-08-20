@@ -24,12 +24,13 @@ designed but **not yet implemented** — the API previews for them are marked
 | `ChatValue`, tool declarations, schemas | `ChatCore` | ✅ Available |
 | `ChatMessage`, `Attachment` | `ChatCore` | ✅ Available |
 | `PermissionService`, `QuestionService` | `ChatCore` | ✅ Available |
+| Todo checklist, plan mode | `ChatCore` | ✅ Available |
 | Protocol seams (`ChatBackend`, `ToolProvider`, …) | `ChatCore` | ✅ Available |
 | Agent Skills discovery | `ChatCore` | ✅ Available |
 | Transcript persistence | `ChatCore` | ✅ Available |
 | System-prompt assembly | `ChatCore` | ✅ Available |
 | Slash commands | `ChatCore` | ⬜ Not built yet |
-| `ChatSession` agent loop | `ChatCore` | ⬜ Not built yet |
+| `ChatSession` agent loop | `ChatCore` | ✅ Available |
 | Gemini backend | `ChatGemini` | ✅ Available |
 | File + shell tool providers | `ChatTools` | ⬜ Not built yet |
 | MCP client and manager | `ChatMCP` | ⬜ Not built yet |
@@ -88,6 +89,59 @@ directory.
 
 ```swift
 import ChatCore
+```
+
+---
+
+## Quickstart
+
+Everything is configured once; after that a host only calls `send` / `stop` and
+reads `messages`.
+
+```swift
+import ChatCore
+import ChatGemini
+
+let session = ChatSession(configuration: ChatSessionConfiguration(
+    backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash)),
+    toolProviders: [MyToolProvider()],
+    persona: .default,
+    workingDirectory: projectURL,
+    skills: .claudeCompatible,
+    maxTurns: 100,
+    historyStore: .applicationSupport("MyApp"),
+    telemetry: MyTelemetry(),
+    onRunFinished: { outcome in
+        if outcome == .completed { notifyUser("Your request is ready.") }
+    }))
+
+session.send("Refactor this view", attachments: [.image(data, mimeType: "image/png")])
+session.stop()
+```
+
+`ChatSession` is `@MainActor @Observable`, so a SwiftUI view reads its state
+directly and updates when it changes:
+
+```swift
+session.messages        // [ChatMessage] — the visible transcript
+session.isStreaming     // true while a run is in flight, including while parked
+session.error           // last failure, cleared at the start of each run
+session.todos           // [TodoItem] — the model's checklist
+session.usage           // cumulative TokenUsage; .lastTurnUsage for the last turn
+session.planMode
+session.permissions.pending   // render an approval card when non-nil
+session.questions.pending     // render a question card when non-nil
+```
+
+And the actions:
+
+```swift
+session.setPlanMode(true)   // research only; mutating tools are refused
+session.regenerate()        // redo the last user message
+session.newChat()
+session.load(storedSession)
+session.save()
+session.workingDirectory = url   // rescans project-local skills
 ```
 
 ---
@@ -549,6 +603,73 @@ point above without a network or a Firebase project.
 
 ---
 
+## The agent loop
+
+`ChatSession` runs the loop that makes this an agent rather than a chat box:
+stream a turn, run whatever tools the model called, feed the results back,
+repeat until it answers without calling anything or the turn cap is reached.
+
+Behaviours worth knowing, because they are what the loop's tests pin down:
+
+- **A turn that only called tools leaves no empty bubble.** The assistant
+  message opened for it is removed rather than rendered blank.
+- **Parallel calls run concurrently** and are answered as a single turn, in call
+  order. Independent reads and searches are the common case, and serializing
+  them wastes most of a turn.
+- **The permission gate is sequential**, before any dispatch. Running it inside
+  the parallel group would show the user several approval cards at once.
+- **A refused call still reports back.** The model receives an instruction
+  ("the user declined this — don't retry it") rather than a bare error, because
+  a model told not to retry stops retrying.
+- **An abnormal finish ends the run.** A truncated or filtered turn is noted in
+  the bubble and the loop stops; continuing would feed the model back a turn it
+  never finished.
+- **Tool errors are never thrown past the loop.** They are data the model reads
+  and recovers from. A network-shaped failure is retried once first.
+- **Token usage is the last value a turn reported**, not the sum of its chunks —
+  providers report cumulatively, so summing would multiply it.
+- **The model is rebuilt only when its inputs change.** The system prompt, the
+  assembled tool list and each provider's `declarationsVersion` form a
+  fingerprint; an unchanged fingerprint skips the re-upload.
+
+### Tools the session owns
+
+Three tools act on the session's own state, so they are implemented by the
+session rather than by a provider, and a provider cannot shadow them:
+
+| Tool | Effect | Offered when |
+|---|---|---|
+| `todoWrite` | Replaces `session.todos` | `enableTodos` (default on) |
+| `askUser` | Parks the loop on `questions.pending` | `enableQuestions` (default on) |
+| `exitPlanMode` | Asks for approval, then turns plan mode off | only in plan mode |
+
+None of them prompt for permission — a confirmation dialog for "update the
+checklist" is noise. `useSkill` is added automatically when any skill is
+installed.
+
+### Plan mode
+
+```swift
+session.setPlanMode(true)
+```
+
+While on, any call to a tool listed in its provider's `mutatingToolNames` is
+refused before it runs, and `exitPlanMode` appears in the tool list. Plan mode
+outranks permissions: a tool the user already granted "Always allow" is still
+refused. Approving the plan turns plan mode off and lets the model proceed in
+the same run.
+
+### History replay
+
+`session.load(_:)` restores a transcript, and the next send replays it to the
+backend as real function call/response parts rather than prose about them.
+Consecutive calls and their results coalesce into one turn each way, mirroring
+how the loop emits them. Two things are deliberately dropped: turns saved
+without their raw payloads (they cannot be rebuilt faithfully), and a trailing
+unanswered call (it would make the next send invalid).
+
+---
+
 ## Implementing the seams
 
 Everything host-specific plugs in here. These protocols exist and compile today;
@@ -697,48 +818,10 @@ it appears more than once. An ambiguous edit is a bug, not something to guess at
 
 # Not built yet
 
-The following is the intended shape of the finished API, recorded here as
-design intent. **None of it compiles today.**
-
-```swift
-let session = ChatSession(configuration: .init(
-    backend: GeminiBackend(.init(model: "gemini-3.5-flash", enableGoogleSearch: true)),
-    toolProviders: [
-        FileToolProvider(fileSystem: LocalFileSystem()),
-        ShellToolProvider(),
-        mcpManager,
-        MyAppToolProvider(),
-    ],
-    persona: .default,
-    workingDirectory: projectURL,
-    skills: .claudeCompatible,
-    historyStore: .applicationSupport("MyApp"),
-    autoAllowedTools: FileToolProvider.readOnlyNames,
-    compressor: nil,
-    telemetry: MyTelemetry(),
-    maxTurns: 100))
-
-session.send("Refactor this view", attachments: [.image(data)])
-session.stop()
-
-session.messages       // [ChatMessage]
-session.isStreaming
-session.todos          // [TodoItem]
-session.permissions.pending
-session.questions.pending
-
-session.setPlanMode(true)
-session.compact()
-session.newChat()
-```
-
-`ChatSession` will be `@Observable @MainActor`, so SwiftUI hosts read properties
-directly; non-SwiftUI hosts can use an `onEvent` closure on the configuration.
-
-Planned behaviours: a 100-turn cap, parallel tool dispatch, permission gating,
-read-only plan mode, agent skills with `SKILL.md` discovery, slash commands
-(`/clear`, `/compact`, `/plan`, `/init`), todo tracking, and session persistence
-with faithful tool-turn replay.
+Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`), the
+built-in file and shell tool providers (`ChatTools`), the MCP client
+(`ChatMCP`), and the SwiftUI renderer and agent cards (`ChatUI`). Until
+`ChatTools` lands, a host supplies its own `ToolProvider` for file access.
 
 ---
 
@@ -749,7 +832,7 @@ swift build
 swift test
 ```
 
-Currently 104 tests across 15 suites. The Markdown suites are ported verbatim
+Currently 135 tests across 21 suites. The Markdown suites are ported verbatim
 from the originating app — that equivalence is the primary regression signal for
 the parser.
 
