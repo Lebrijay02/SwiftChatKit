@@ -1,0 +1,529 @@
+# SwiftChatKit
+
+A reusable, backend-neutral agentic chat engine for Swift. Configure one object
+up front, then `send` / `stop` / read `messages`. UI handling stays outside the
+engine.
+
+The design goal is portability: `ChatCore` has **zero external dependencies**,
+and nothing app-specific lives in the package. Domain tools, telemetry, theming
+and context compression all arrive through protocols the host conforms to.
+
+---
+
+## ⚠️ Status: under construction
+
+This package is being built incrementally. **Only the pieces listed under
+"Available today" exist and compile.** The `ChatSession` engine, the Gemini
+backend, the built-in file/shell tools, MCP and the SwiftUI renderer are
+designed but **not yet implemented** — the API previews for them are marked
+`Not built yet` and will not compile.
+
+| Component | Module | Status |
+|---|---|---|
+| Markdown parser | `ChatCore` | ✅ Available |
+| `ChatValue`, tool declarations, schemas | `ChatCore` | ✅ Available |
+| `ChatMessage`, `Attachment` | `ChatCore` | ✅ Available |
+| `PermissionService` | `ChatCore` | ✅ Available |
+| Protocol seams (`ChatBackend`, `ToolProvider`, …) | `ChatCore` | ✅ Available |
+| Skills, slash commands, history store, prompts | `ChatCore` | ⬜ Not built yet |
+| `ChatSession` agent loop | `ChatCore` | ⬜ Not built yet |
+| Gemini backend | `ChatGemini` | ⬜ Not built yet |
+| File + shell tool providers | `ChatTools` | ⬜ Not built yet |
+| MCP client and manager | `ChatMCP` | ⬜ Not built yet |
+| SwiftUI Markdown renderer, agent cards | `ChatUI` | ⬜ Not built yet |
+
+Every code sample in the "Available today" sections is compile-checked by
+`Tests/ChatCoreTests/READMEExamples.swift`. If a sample stops compiling, the
+build breaks.
+
+---
+
+## Requirements
+
+| | |
+|---|---|
+| Swift toolchain | **6.2** or later (`swift-tools-version: 6.2`) |
+| Language mode | **Swift 6** — strict concurrency is on |
+| Platforms | macOS 14+, iOS 17+ |
+| Dependencies | none for `ChatCore` |
+
+Strict concurrency is not optional here. Types that cross the tool boundary
+(`ChatValue`, `ChatMessage`, `ToolDeclaration`, `ToolCall`, `ToolResult`,
+`Attachment`) are all `Sendable`; `ToolProvider` and `ChatBackend` are `Sendable`
+protocols, so conformers are typically `actor`s or `@MainActor` classes.
+
+Planned per-module dependencies, once those modules land: `ChatGemini` will
+require `firebase-ios-sdk` (`FirebaseAILogic`) and `ChatMCP` will require
+`modelcontextprotocol/swift-sdk`. Neither will affect `ChatCore` consumers.
+
+## Installation
+
+```swift
+// Package.swift
+dependencies: [
+    .package(path: "../SwiftChatKit"),
+],
+targets: [
+    .target(name: "MyApp", dependencies: [
+        .product(name: "SwiftChatKit", package: "SwiftChatKit"),
+    ])
+]
+```
+
+In Xcode: **File → Add Package Dependencies → Add Local…** and pick the package
+directory.
+
+```swift
+import ChatCore
+```
+
+---
+
+# Available today
+
+## Markdown parsing
+
+A Foundation-only CommonMark-plus parser producing a document model. It is
+deliberately tolerant of unterminated constructs, because a message being
+streamed is half-written most of the time — an unclosed code fence or `$$` math
+block still renders rather than collapsing the rest of the message.
+
+```swift
+let blocks = MarkdownBlockParser.parse("# Title\n\nSome **bold** text.")
+
+for block in blocks {
+    switch block {
+    case .heading(let level, let content, let id):  ...
+    case .paragraph(let inlines):                   ...
+    case .codeBlock(let language, let code):        ...
+    case .list(let items):                          ...   // items have .depth, .marker
+    case .table(let table):                         ...   // .headers, .alignments, .rows
+    case .blockQuote(let depth, let content):       ...
+    case .mathBlock(let inlines):                   ...
+    case .thematicBreak:                            ...
+    case .definitionList(let definitions):          ...
+    case .footnoteDefinition(let label, let body):  ...
+    }
+}
+```
+
+Inline spans nest explicitly, so `**bold *and* italic**` composes rather than
+flattening into a single attribute set:
+
+```swift
+MarkdownInlineParser.parse("a `code` span and [a link](https://example.com)")
+// [.text("a "), .code("code"), .text(" span and "),
+//  .link(children: [.text("a link")], destination: "https://example.com")]
+```
+
+Supported: ATX headings (with `{#custom-id}`), lists including task and ordered
+and nested, blockquotes with depth, fenced code, tables with alignment, footnote
+definitions and references, definition lists, thematic breaks, strong, emphasis,
+strikethrough, highlight, subscript, superscript, inline code, links, images,
+escapes, and LaTeX math.
+
+Math is translated into displayable inline nodes rather than rendered as an
+image:
+
+```swift
+MarkdownMath.render(#"\frac{a}{b}"#)
+MarkdownMath.looksLikeMath("x^2")   // false for "$5 and $10" — currency is not math
+```
+
+`MarkdownInline` and `MarkdownBlock` are `Equatable` and `Sendable`, and know
+nothing about fonts, colors or platforms. Turning them into an attributed string
+is the renderer's job (`ChatUI`, not yet built).
+
+## `ChatValue` — the JSON type
+
+Every tool argument, tool result and persisted payload passes through
+`ChatValue`. It exists so that no model SDK's value type leaks into a tool
+signature — swapping backends must not ripple through every tool you wrote.
+
+```swift
+let args: ChatValue = [
+    "path": "/tmp/a.swift",
+    "limit": 100,
+    "replaceAll": false,
+    "tags": ["x"],
+]
+
+args["path"]?.stringValue      // "/tmp/a.swift"
+args["limit"]?.intValue        // 100
+args["replaceAll"]?.boolValue  // false — not collapsed to a number
+args["tags"]?.arrayValue       // [.string("x")]
+args["nope"]                   // nil
+```
+
+Cases are `.null`, `.bool`, `.number(Double)`, `.string`, `.array`, `.object`.
+Literal conformances mean you rarely write a case name.
+
+```swift
+args.jsonString()                    // sorted keys, so saved sessions diff cleanly
+args.jsonString(prettyPrinted: true)
+args.jsonObject                      // JSONSerialization-compatible
+
+ChatValue.parse(#"{"ok":true}"#)     // ChatValue?
+ChatValue.parse(#"{"trunca"#)        // nil — models do emit truncated arguments
+ChatValue(json: someDecodedDictionary)
+```
+
+Two behaviours worth knowing, both covered by tests:
+
+- **Booleans stay booleans.** `NSNumber` erases `Bool`, so the
+  `JSONSerialization` bridge checks `CFBooleanGetTypeID` before reading a number.
+- **`intValue` refuses to truncate.** `0.5` reads back as `nil`, not `0`.
+
+## Declaring tools
+
+```swift
+let readTextFile = ToolDeclaration(
+    name: "readTextFile",
+    description: "Read a UTF-8 text file.",
+    parameters: [
+        "path":    .string(description: "Absolute path to the file."),
+        "limit":   .integer(description: "Maximum number of lines."),
+        "mode":    .enumeration(values: ["head", "tail"], description: "Which end to read."),
+        "options": .object(properties: ["trim": .boolean()], optional: ["trim"]),
+        "globs":   .array(items: .string(), description: "Filters."),
+    ],
+    optional: ["limit", "mode", "options", "globs"])
+```
+
+`ToolSchema` is a deliberate JSON-Schema *subset* — the intersection every
+provider agrees on. Anything richer stops round-tripping cleanly between
+providers, so `allOf`/`anyOf`/`$ref` are out of scope by design.
+
+Note the direction: you list which parameters are **optional**, and everything
+else is required. That matches how both Gemini and MCP express it.
+
+## Calls and results
+
+```swift
+let call = ToolCall(name: "readTextFile", arguments: ["path": "/tmp/a.swift"])
+
+ToolResult.success(call, ["content": "…"])
+ToolResult.failure(call, "No such file")   // → payload ["error": "No such file"]
+
+result.errorMessage   // String? — nil on success
+```
+
+**Tool failures are returned as data, never thrown past the agent loop.** A
+failing tool is something the model should read and recover from, not something
+that should tear down the turn.
+
+## Messages and attachments
+
+```swift
+var transcript: [ChatMessage] = [
+    .user("Read this file", attachments: [.image(jpegData)]),
+    .assistant("", isStreaming: true),
+]
+
+transcript.append(.toolCall(call))
+transcript.append(.toolResult(.success(call, ["content": "…"])))
+```
+
+Tool calls and results are **first-class messages**, not hidden protocol
+traffic — the UI renders them, and replaying them is how history is rebuilt.
+
+```swift
+message.role          // .user | .assistant | .toolCall(toolName:) | .toolResult
+message.content       // display text (lossy for tool messages)
+message.rawArguments  // [String: ChatValue]? — the exact payload
+message.rawResult     // [String: ChatValue]?
+message.callID        // correlates .toolCall with its .toolResult
+message.isStreaming
+message.status        // .queued | .inProgress | .completed | .cancelled | .incomplete
+message.duration      // TimeInterval? — set once completedAt lands
+message.toolName
+```
+
+`content` is a lossy, human-readable rendering for tool messages;
+`rawArguments`/`rawResult` keep the payload verbatim so a reloaded session can be
+replayed to the backend as real function call/response parts rather than prose.
+**Don't drop them when persisting** — history replay depends on it.
+
+Attachments are `Data` + `mimeType` + `kind`, never a platform image. An
+`NSImage`-backed attachment cannot cross to iOS, and the encoding decision
+(JPEG quality, downscaling) belongs to whoever picked the file.
+
+```swift
+Attachment.image(jpegData, mimeType: "image/jpeg", filename: "shot.jpg")
+Attachment.pdf(pdfData, filename: "spec.pdf")
+Attachment.contentsOf(fileURL)   // Attachment? — infers MIME from the extension
+```
+
+Inferred types: jpg/jpeg, png, gif, webp, heic, pdf. Anything else returns `nil`
+rather than guessing at a type no backend accepts inline.
+
+## Permissions
+
+Mutating tools suspend the agent loop until the user answers, so a model can
+never write to disk or run a command without the user having seen exactly what
+it asked for.
+
+```swift
+let permissions = PermissionService(
+    autoAllowed: ["readTextFile", "listDirectory"],
+    store: UserDefaultsPermissionStore(key: "MyApp.alwaysAllowedTools"))
+
+if permissions.requiresApproval("writeFile") {
+    // Suspends here until the UI calls resolve(_:).
+    let decision = await permissions.request(
+        PermissionRequest(kind: .tool,
+                          toolName: "writeFile",
+                          title: "Write Notes.swift",
+                          detail: diffText))
+    guard decision != .deny else { return }
+}
+```
+
+Drive it from SwiftUI — `PermissionService` is `@MainActor @Observable`:
+
+```swift
+if let request = permissions.pending {
+    VStack(alignment: .leading) {
+        Text(request.title).bold()
+        ScrollView { Text(request.detail).monospaced() }
+        HStack {
+            Button("Allow once")   { permissions.resolve(.allowOnce) }
+            Button("Always allow") { permissions.resolve(.alwaysAllow) }
+            Button("Deny")         { permissions.resolve(.deny) }
+        }
+    }
+}
+```
+
+Also available: `cancelPending()` (deny and dismiss — call this when the user
+stops streaming), `revokeAlwaysAllow(_:)`, and the `alwaysAllowed` /
+`autoAllowed` sets.
+
+`PermissionRequest.detail` is what the user actually judges, so make it
+complete — the full command, the whole diff, the entire plan. A truncated detail
+turns the gate into a rubber stamp.
+
+Storage is injectable: `UserDefaultsPermissionStore` persists grants across
+launches, `EphemeralPermissionStore` keeps them in memory, or conform
+`PermissionStore` yourself to scope grants per project.
+
+`PermissionRequest.kind` is `.tool` or `.plan`, the latter for approving an exit
+from read-only plan mode.
+
+---
+
+## Implementing the seams
+
+Everything host-specific plugs in here. These protocols exist and compile today;
+what consumes them (`ChatSession`) does not yet.
+
+### `ToolProvider` — add capabilities
+
+```swift
+final class EchoToolProvider: ToolProvider {
+
+    var declarations: [ToolDeclaration] {
+        get async {
+            [ToolDeclaration(name: "echo",
+                             description: "Echo text back.",
+                             parameters: ["text": .string()])]
+        }
+    }
+
+    func execute(_ call: ToolCall) async -> ToolResult {
+        guard let text = call.arguments["text"]?.stringValue else {
+            return .failure(call, "Missing required argument: text")
+        }
+        return .success(call, ["echoed": .string(text)])
+    }
+
+    // Optional: render a better approval card than the generic one.
+    func approvalCard(for call: ToolCall) async -> PermissionRequest? {
+        PermissionRequest(toolName: call.name, title: "Echo",
+                          detail: call.arguments["text"]?.stringValue ?? "")
+    }
+
+    var autoAllowedToolNames: Set<String> { ["echo"] }   // safe, never prompts
+    var mutatingToolNames: Set<String> { [] }            // blocked in plan mode
+}
+```
+
+Defaults are provided for `handles(_:)` (matches against `declarations`),
+`approvalCard(for:)` (nil → generic card), both name sets (empty), and
+`declarationsVersion` (0 — bump it if your tool list changes at runtime, so the
+session knows to rebuild the model).
+
+### `ChatBackend` — talk to a model
+
+An `actor` satisfies the `AnyObject, Sendable` requirement cleanly:
+
+```swift
+actor EchoBackend: ChatBackend {
+    private var turns: [ChatTurn] = []
+    var history: [ChatTurn] { turns }
+    var modelName: String { "echo-1" }
+
+    func configure(systemInstruction: String,
+                   tools: [ToolDeclaration],
+                   history: [ChatTurn]) {
+        turns = history
+    }
+
+    nonisolated func stream(_ input: TurnInput) -> AsyncThrowingStream<TurnChunk, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.text("…"))
+            continuation.yield(.usage(TokenUsage(prompt: 1, completion: 1, total: 2)))
+            continuation.yield(.finish(.stop))
+            continuation.finish()
+        }
+    }
+}
+```
+
+Consuming a turn:
+
+```swift
+for try await chunk in backend.stream(.message("Hello")) {
+    switch chunk {
+    case .text(let delta):   reply += delta
+    case .toolCall(let call): pending.append(call)
+    case .usage(let usage):   total = total + usage
+    case .finish(let reason): note = reason.userFacingNote
+    }
+}
+```
+
+Contract notes for implementors:
+
+- **Never emit reasoning or "thought" text as `.text`.** The transcript shows
+  only what the user should read.
+- `configure` must not lose history — it is called between turns whenever tools
+  or context go stale, so it has to be cheap and non-destructive.
+- Cancelling the consuming task must stop the underlying request.
+- Appending the turn and its response to `history` is the backend's job.
+
+`ChatTurn` is distinct from `ChatMessage`: it is what the *backend* replays,
+and several messages collapse into one turn when a model emits parallel tool
+calls. Answer a batch of parallel calls together —
+`TurnInput.toolResults([...])` — because splitting them desynchronizes
+call/response pairing.
+
+`FinishReason` maps provider raw values (`STOP`, `MAX_TOKENS`, `SAFETY`,
+`PROHIBITED_CONTENT`, `RECITATION`, `MALFORMED_FUNCTION_CALL`, `LANGUAGE`) and
+degrades unknown future values to `.other` rather than failing.
+`userFacingNote` is `nil` for normal stops and a sentence to append to the
+bubble otherwise.
+
+### `ChatTelemetry` — analytics
+
+Fire-and-forget. The session never waits on it and never surfaces its failures:
+telemetry must not be able to break a chat.
+
+```swift
+struct MyTelemetry: ChatTelemetry {
+    func record(_ metrics: TurnMetrics) async {
+        // .sessionID .modelName .usage .toolsCalled .turnCount .duration .error
+    }
+}
+```
+
+### `ContextCompressor` — shrink oversized tool output
+
+Long `grep` and `readFile` results otherwise dominate the context window within
+a few turns.
+
+```swift
+struct MyCompressor: ContextCompressor {
+    var threshold: Int { 4_000 }
+    var declarations: [ToolDeclaration] { [retrieveTool] }
+    var systemInstruction: String { "Long results are summarized; call retrieve to expand." }
+
+    func compress(_ text: String, toolName: String) async -> String { ... }
+    func retrieve(handle: String, query: String?) async throws -> String { ... }
+}
+```
+
+`compress` **must fail open** — return `text` unchanged on error rather than
+throwing. A compression outage should degrade context efficiency, not the chat.
+
+### `FileSystemProviding` — back the built-in file tools
+
+Abstracted so you can point the file tools at a sandboxed root, a virtual
+project, or a remote workspace instead of the local disk. Covers
+`currentDirectory`, `readText`/`readData`, `write`/`edit`, `createDirectory`,
+`list`, `move`, `info`, `glob` and `grep`.
+
+`edit` throws when the target string is absent, or — unless `replaceAll` — when
+it appears more than once. An ambiguous edit is a bug, not something to guess at.
+
+---
+
+# Not built yet
+
+The following is the intended shape of the finished API, recorded here as
+design intent. **None of it compiles today.**
+
+```swift
+let session = ChatSession(configuration: .init(
+    backend: GeminiBackend(.init(model: "gemini-3.5-flash", enableGoogleSearch: true)),
+    toolProviders: [
+        FileToolProvider(fileSystem: LocalFileSystem()),
+        ShellToolProvider(),
+        mcpManager,
+        MyAppToolProvider(),
+    ],
+    persona: .default,
+    workingDirectory: projectURL,
+    skills: .claudeCompatible,
+    historyStore: .applicationSupport("MyApp"),
+    autoAllowedTools: FileToolProvider.readOnlyNames,
+    compressor: nil,
+    telemetry: MyTelemetry(),
+    maxTurns: 100))
+
+session.send("Refactor this view", attachments: [.image(data)])
+session.stop()
+
+session.messages       // [ChatMessage]
+session.isStreaming
+session.todos          // [TodoItem]
+session.permissions.pending
+session.questions.pending
+
+session.setPlanMode(true)
+session.compact()
+session.newChat()
+```
+
+`ChatSession` will be `@Observable @MainActor`, so SwiftUI hosts read properties
+directly; non-SwiftUI hosts can use an `onEvent` closure on the configuration.
+
+Planned behaviours: a 100-turn cap, parallel tool dispatch, permission gating,
+read-only plan mode, agent skills with `SKILL.md` discovery, slash commands
+(`/clear`, `/compact`, `/plan`, `/init`), todo tracking, and session persistence
+with faithful tool-turn replay.
+
+---
+
+## Building and testing
+
+```sh
+swift build
+swift test
+```
+
+Currently 53 tests across 6 suites. The Markdown suites are ported verbatim from
+the originating app — that equivalence is the primary regression signal for the
+parser.
+
+## Known limitations
+
+- **Session history replay requires payloads saved with `rawArguments` /
+  `rawResult`.** Sessions persisted before those fields existed store only the
+  lossy display rendering in `arguments`, which is not valid JSON and cannot be
+  replayed to a backend as real tool turns.
+- `ToolSchema` covers a JSON-Schema subset only; composition keywords are not
+  represented.
+- `ChatCore` is platform-agnostic, but the built-in shell and stdio-transport
+  tools will be macOS-only when they land — on iOS those targets compile to an
+  empty provider list.
