@@ -38,6 +38,11 @@ struct ChatDemoView: View {
                     ForEach(session.messages) { message in
                         row(message)
                     }
+                    // Sits at the end of the transcript, where the answer is
+                    // about to appear. It stops on its own at the first token.
+                    if session.isThinking {
+                        ThinkingIndicatorView()
+                    }
                     Color.clear.frame(height: 1).id(Self.bottomAnchor)
                 }
                 .padding()
@@ -47,6 +52,9 @@ struct ChatDemoView: View {
                 autoScroll.followStream(proxy, anchor: Self.bottomAnchor)
             }
             .onChange(of: session.messages.count) { _, _ in
+                autoScroll.followEvent(proxy, anchor: Self.bottomAnchor)
+            }
+            .onChange(of: session.isThinking) { _, _ in
                 autoScroll.followEvent(proxy, anchor: Self.bottomAnchor)
             }
             .overlay(alignment: .bottom) {

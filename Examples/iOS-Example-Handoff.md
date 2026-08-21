@@ -87,7 +87,7 @@ compressor, telemetry, onRunFinished
 `ChatSession` is `@Observable @MainActor`. Read:
 
 ```
-messages: [ChatMessage]   isStreaming: Bool   error: String?
+messages: [ChatMessage]   isStreaming: Bool   isThinking: Bool   error: String?
 todos: [TodoItem]         usage: TokenUsage   planMode: Bool
 sessionID: UUID           title: String
 permissions: PermissionService   questions: QuestionService   skills: SkillsService
@@ -153,6 +153,8 @@ Import `ChatUI` and reuse:
 - `PermissionRequestView(request:permissions:)`,
   `QuestionCardView(questions:service:assistantName:)`,
   `TodoListPanelView(todos:)`, `FileDiffPreviewView`.
+- `ThinkingIndicatorView(label:)` — render it on `session.isThinking`, at the end
+  of the transcript. It stops on its own at the first token.
 - `ChatAutoScrollController` + `JumpToBottomButton`.
 - `.chatPalette(.default)` on the root view; `ChatPalette` has eight colors and
   flows through the environment, so theming is one modifier.

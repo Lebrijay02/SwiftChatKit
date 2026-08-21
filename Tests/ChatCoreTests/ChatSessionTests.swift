@@ -55,6 +55,51 @@ struct PlainTurnTests {
         #expect(recorder.outcomes == [.completed])
     }
 
+    @Test("Thinking runs from the request until the first token")
+    func thinkingIndicator() async {
+        let recorder = RunRecorder()
+        let session = makeSession(
+            backend: MockBackend(script: [[.text("Hello."), .finish(.stop)]],
+                                 turnDelay: .milliseconds(200)),
+            recorder: recorder)
+
+        #expect(session.isThinking == false, "nothing has been asked yet")
+
+        session.send("hi")
+        #expect(await Wait.until { session.isThinking })
+        #expect(session.messages.last?.content.isEmpty == true, "no text yet — hence the indicator")
+
+        // The first token replaces the indicator: streaming text is its own.
+        #expect(await Wait.until { !session.isThinking })
+        #expect(session.messages.last?.content.isEmpty == false)
+
+        #expect(await Wait.runs(recorder))
+        #expect(session.isThinking == false)
+    }
+
+    @Test("Thinking resumes between turns, while tools run and nothing is shown")
+    func thinkingBetweenTurns() async {
+        let recorder = RunRecorder()
+        let session = makeSession(
+            backend: MockBackend(script: [
+                [.toolCall(ToolCall(id: "r", name: "readFile", arguments: ["path": "a"])),
+                 .finish(.stop)],
+                [.text("Read it."), .finish(.stop)],
+            ], turnDelay: .milliseconds(200)),
+            providers: [MockProvider.readFile()],
+            recorder: recorder)
+
+        session.send("read it")
+        #expect(await Wait.until { session.isThinking })
+        // The tool call produced a message but no prose, so the wait continues
+        // right through it into the next turn.
+        #expect(await Wait.until { session.messages.contains { $0.toolName == "readFile" } })
+        #expect(session.isThinking)
+
+        #expect(await Wait.runs(recorder))
+        #expect(session.isThinking == false)
+    }
+
     @Test("Usage is the last value reported, not the sum of every chunk")
     func usageIsNotDoubleCounted() async {
         let recorder = RunRecorder()
@@ -252,6 +297,23 @@ struct PermissionLoopTests {
         // The call itself is marked cancelled, not completed.
         #expect(session.messages.first { $0.role == .toolCall(toolName: "writeFile") }?.status
                 == .cancelled)
+    }
+
+    @Test("A parked permission card is the user's wait, not the model's")
+    func thinkingIsFalseWhileParked() async {
+        let recorder = RunRecorder()
+        let provider = MockProvider(tools: [writeTool], mutating: ["writeFile"])
+        let session = makeSession(backend: MockBackend(script: writeScript()),
+                                  providers: [provider], recorder: recorder)
+
+        session.send("write it")
+        #expect(await Wait.until { session.permissions.pending != nil })
+        #expect(session.isStreaming, "the run is parked, not finished")
+        #expect(session.isThinking == false)
+
+        session.permissions.resolve(.allowOnce)
+        #expect(await Wait.runs(recorder))
+        #expect(session.isThinking == false)
     }
 
     @Test("An approved call runs, and Always allow stops the next prompt")

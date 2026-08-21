@@ -160,6 +160,7 @@ directly and updates when it changes:
 ```swift
 session.messages        // [ChatMessage] — the visible transcript
 session.isStreaming     // true while a run is in flight, including while parked
+session.isThinking      // true while the model is working with nothing to show yet
 session.error           // last failure, cleared at the start of each run
 session.todos           // [TodoItem] — the model's checklist
 session.usage           // cumulative TokenUsage; .lastTurnUsage for the last turn
@@ -966,8 +967,23 @@ result.codeRegions    // where the fenced blocks landed
 | `PermissionRequestView` | A pending approval. Renders a real diff for `writeFile` / `editFile` rather than raw JSON arguments — an edit should be judged on what it changes. |
 | `QuestionCardView` | The `askUser` questions, paged one at a time, with options and a free-text "Other". `assistantName` supplies the title, since the package has no product name of its own. |
 | `TodoListPanelView` | The agent's task list. Collapsed it shows only the task in progress. |
+| `ThinkingIndicatorView` | Animated dots for `session.isThinking`. `label:` is the text beside them, or `nil` for dots alone. |
 | `FileDiffPreviewView` | A GitHub-style diff with line numbers, used by the approval card and usable on its own. |
 | `JumpToBottomButton` | Offered while the reader is scrolled up during a turn. |
+
+Put the indicator at the end of the transcript, where the answer will appear:
+
+```swift
+if session.isThinking {
+    ThinkingIndicatorView()
+}
+```
+
+`isThinking` is deliberately narrower than `isStreaming`. It goes false on the
+first token — streaming text is its own indicator, and showing both reads as two
+things happening at once — and it is false while a permission card or question
+is parked, because the run is waiting on the *user* then. It goes true again
+between turns, while tools run and there is nothing to look at.
 
 ### Auto-scroll
 

@@ -27,6 +27,22 @@ public final class ChatSession {
     /// or question is parked waiting on the user.
     public private(set) var isStreaming = false
 
+    /// True while the model is working and there is nothing yet to look at: the
+    /// request is out but no text has arrived, or tools are running between
+    /// turns. Goes false on the first token of a turn, because streaming text is
+    /// its own indicator.
+    ///
+    /// It is also false while a permission card or a question is parked — the
+    /// run is waiting on the *user* then, and telling them the model is thinking
+    /// while it waits for their answer is a lie that reads as a hang.
+    public var isThinking: Bool {
+        modelIsWorking && permissions.pending == nil && questions.pending == nil
+    }
+
+    /// Backs `isThinking`. Separate because the parked case is derived from the
+    /// sub-services rather than from the loop's own progress.
+    private var modelIsWorking = false
+
     /// Last run's failure, if any. Cleared at the start of each run.
     public private(set) var error: String?
 
@@ -251,6 +267,7 @@ public final class ChatSession {
 
     private func run(userText: String, attachments: [Attachment]?) async {
         isStreaming = true
+        modelIsWorking = true
         error = nil
         let started = Date()
 
@@ -266,6 +283,10 @@ public final class ChatSession {
         while turn < configuration.maxTurns {
             if Task.isCancelled { outcome = .stopped; break }
 
+            // Every turn starts with the model thinking again: the previous
+            // turn's text stopped the indicator, and this one has produced none.
+            modelIsWorking = true
+
             let assistantID = openAssistantMessage()
             var calls: [ToolCall] = []
             var finish: FinishReason?
@@ -278,6 +299,7 @@ public final class ChatSession {
                     if Task.isCancelled { break }
                     switch chunk {
                     case .text(let delta):
+                        modelIsWorking = false
                         appendText(delta, to: assistantID)
                     case .toolCall(let call):
                         calls.append(call)
@@ -323,6 +345,8 @@ public final class ChatSession {
             guard !calls.isEmpty else { break }
 
             toolsCalled += calls.map(\.name)
+            // Tools produce no text, so the indicator carries the whole wait.
+            modelIsWorking = true
             let results = await execute(calls)
 
             if Task.isCancelled { outcome = .stopped; break }
@@ -337,6 +361,7 @@ public final class ChatSession {
         }
 
         isStreaming = false
+        modelIsWorking = false
         finalizeStreamingMessages()
         save()
 

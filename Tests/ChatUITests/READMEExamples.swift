@@ -55,6 +55,9 @@ struct ChatUIREADMEExamples {
         _ = PermissionRequestView(request: request, permissions: permissions)
         _ = TodoListPanelView(todos: [TodoItem(content: "Ship it", status: .inProgress)])
         _ = QuestionCardView(questions: [], service: QuestionService(), assistantName: "Ada")
+        _ = ThinkingIndicatorView()
+        _ = ThinkingIndicatorView(label: nil)
+        _ = ThinkingIndicatorView(label: "Working…")
     }
 
     @Test("Auto-scroll follows until the reader scrolls away")
