@@ -398,7 +398,7 @@ public final class ChatSession {
 
             // Plan mode outranks permissions: a tool the user already granted
             // "always allow" must still be refused while planning.
-            if planMode, provider.mutatingToolNames.contains(call.name) {
+            if planMode, await provider.mutatingToolNames.contains(call.name) {
                 results[index] = .failure(call, AgentRefusal.planModeBlocked)
                 cancel(messageIDs[index])
                 continue

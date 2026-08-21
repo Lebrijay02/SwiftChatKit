@@ -32,7 +32,9 @@ public protocol ToolProvider: AnyObject, Sendable {
     var autoAllowedToolNames: Set<String> { get }
 
     /// Tools that must be blocked in plan mode because they mutate state.
-    var mutatingToolNames: Set<String> { get }
+    /// Async because a provider whose tool list is discovered at runtime — an
+    /// MCP bridge, say — cannot answer this from a static set.
+    var mutatingToolNames: Set<String> { get async }
 
     /// Told when the session's working directory changes, and once at session
     /// init. Providers that resolve paths or spawn processes need to follow it;
@@ -56,7 +58,7 @@ public extension ToolProvider {
 
     var autoAllowedToolNames: Set<String> { [] }
 
-    var mutatingToolNames: Set<String> { [] }
+    var mutatingToolNames: Set<String> { get async { [] } }
 
     var declarationsVersion: Int { get async { 0 } }
 

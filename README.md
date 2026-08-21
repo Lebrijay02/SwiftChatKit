@@ -32,13 +32,14 @@ are marked `Not built yet` and will not compile.
 | `ChatSession` agent loop | `ChatCore` | ✅ Available |
 | Gemini backend | `ChatGemini` | ✅ Available |
 | File + shell tool providers | `ChatTools` | ✅ Available |
-| MCP client and manager | `ChatMCP` | ⬜ Not built yet |
+| MCP client and manager | `ChatMCP` | ✅ Available |
 | SwiftUI Markdown renderer, agent cards | `ChatUI` | ⬜ Not built yet |
 
 Every code sample in the "Available today" sections is compile-checked by
 `Tests/ChatCoreTests/READMEExamples.swift`,
-`Tests/ChatGeminiTests/READMEExamples.swift` and
-`Tests/ChatToolsTests/READMEExamples.swift`, which import the modules the way a
+`Tests/ChatGeminiTests/READMEExamples.swift`,
+`Tests/ChatToolsTests/READMEExamples.swift` and
+`Tests/ChatMCPTests/READMEExamples.swift`, which import the modules the way a
 consumer does. If a sample stops compiling, the build breaks.
 
 ---
@@ -58,8 +59,9 @@ Strict concurrency is not optional here. Types that cross the tool boundary
 protocols, so conformers are typically `actor`s or `@MainActor` classes.
 
 Dependencies are per-module. `ChatGemini` pulls in `firebase-ios-sdk`
-(`FirebaseAILogic`); `ChatMCP` will pull in `modelcontextprotocol/swift-sdk`
-when it lands. Neither affects consumers of the `SwiftChatKitCore` product,
+(`FirebaseAILogic`); `ChatMCP` pulls in `modelcontextprotocol/swift-sdk`,
+though only for its transports — the JSON-RPC handshake is driven by hand.
+Neither affects consumers of the `SwiftChatKitCore` product,
 which is `ChatCore` alone with no external dependencies.
 
 Using `ChatGemini` additionally requires a Firebase project with Vertex AI
@@ -754,6 +756,87 @@ exit code and recover, not have the turn fail.
 
 ---
 
+## MCP servers
+
+`ChatMCP` exposes any number of [Model Context Protocol](https://modelcontextprotocol.io)
+servers to the model as ordinary tools. `MCPManager` is itself a `ToolProvider`,
+so wiring it up is a one-liner in the session configuration.
+
+```swift
+let manager = MCPManager(
+    store: MCPServerStore(),
+    seedServers: [
+        MCPServerConfig(name: "Docs",
+                        transport: .http(url: URL(string: "https://example.com/mcp")!,
+                                         auth: .bearer(token: "…")))
+    ])
+
+await manager.loadAndConnectEnabled()
+await manager.setReadOnly(["search_docs"])
+
+let configuration = ChatSessionConfiguration(backend: backend,
+                                             toolProviders: [manager])
+```
+
+`MCPServerStore` persists the user's server list in `UserDefaults` (key and suite
+both injectable). `loadAndConnectEnabled()` merges the seeds you pass with what
+the user has saved — seeds never resurrect a server the user disabled.
+
+### Transports
+
+| Transport | Availability | Notes |
+|---|---|---|
+| `.stdio(command:arguments:)` | macOS only | Launches a child process. `PATH` is augmented with the usual Homebrew and `nvm` locations, because a GUI app inherits launchd's minimal `PATH` and would not otherwise find `npx`. |
+| `.http(url:auth:)` | macOS and iOS | Streamable HTTP. `auth` is `.none`, `.bearer(token:)`, or `.oauth`. |
+
+OAuth is a seam, not an implementation: a server configured with `.oauth` is
+reported as `.needsAuth` unless you supply an `MCPAuthorizationProvider`. The
+browser flow and token storage belong to the host, which knows its own identity
+and keychain.
+
+### Importing an existing config
+
+The standard `mcpServers` file format is read directly, so a user can paste the
+config they already use elsewhere:
+
+```swift
+let servers = MCPServerConfig.decodeMCPServers(from: data)
+```
+
+Unrecognised keys are skipped rather than failing the whole import — these files
+routinely contain fields this package knows nothing about.
+
+### Tool naming and permissions
+
+Tool names are recomputed across all servers in list order whenever the connected
+set changes. The first server to claim a name keeps it; later ones are prefixed
+with their server name (`Beta_Server_read`). Resolving collisions incrementally
+would make a name depend on connection order, so a reconnect could rename a tool
+mid-session and strand the model's memory of it.
+
+No MCP tool is ever auto-allowed, and every one counts as mutating in plan mode
+unless you name it in `setReadOnly(_:)`. The package cannot know what a
+third-party tool does, so it assumes the worst.
+
+### Connection state
+
+`MCPManager` is an `actor` — `ToolProvider` inherits `Sendable`, and Swift 6
+rejects a main-actor-isolated conformance to it. Hosts that render connection
+state pass `onStatusChange`, which is delivered on the main actor:
+
+```swift
+let manager = MCPManager(store: MCPServerStore()) { statuses in
+    for status in statuses.values where status.state == .needsAuth {
+        promptSignIn(for: status.id)
+    }
+}
+```
+
+A call to a dead server is retried once after reconnecting. Stdio children die
+quietly, and a crashed child looks exactly like a failed call until you try again.
+
+---
+
 ## Implementing the seams
 
 Everything host-specific plugs in here. These protocols exist and compile today;
@@ -903,8 +986,8 @@ than reporting a success that changed nothing.
 
 # Not built yet
 
-Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`), the MCP
-client (`ChatMCP`), and the SwiftUI renderer and agent cards (`ChatUI`).
+Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`) and the
+SwiftUI renderer and agent cards (`ChatUI`).
 
 ---
 
@@ -915,7 +998,7 @@ swift build
 swift test
 ```
 
-Currently 197 tests across 31 suites. The Markdown suites are ported verbatim
+Currently 254 tests across 40 suites. The Markdown suites are ported verbatim
 from the originating app — that equivalence is the primary regression signal for
 the parser.
 

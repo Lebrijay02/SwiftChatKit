@@ -7,12 +7,15 @@ let package = Package(
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         // Headless engine: models, agent loop, tools, backends. No UI.
-        .library(name: "SwiftChatKit", targets: ["ChatCore", "ChatTools", "ChatGemini"]),
+        .library(name: "SwiftChatKit", targets: ["ChatCore", "ChatTools", "ChatMCP", "ChatGemini"]),
         // The core alone, for hosts bringing their own backend.
         .library(name: "SwiftChatKitCore", targets: ["ChatCore"]),
     ],
     dependencies: [
         .package(url: "https://github.com/firebase/firebase-ios-sdk", from: "12.14.0"),
+        // Used only for its transports and JSON-Schema value type; the JSON-RPC
+        // handshake is driven by hand in `MCPClient`.
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk", from: "0.12.1"),
     ],
     targets: [
         // Foundation only. The zero-dependency rule here is what keeps the
@@ -33,6 +36,11 @@ let package = Package(
         // through `FileSystemProviding`, so nothing here binds to a real disk.
         .target(name: "ChatTools", dependencies: ["ChatCore"]),
         .testTarget(name: "ChatToolsTests", dependencies: ["ChatTools"]),
+
+        // The MCP bridge. Depends on the official SDK for its transports only.
+        .target(name: "ChatMCP",
+                dependencies: ["ChatCore", .product(name: "MCP", package: "swift-sdk")]),
+        .testTarget(name: "ChatMCPTests", dependencies: ["ChatMCP"]),
     ],
     swiftLanguageModes: [.v6]
 )
