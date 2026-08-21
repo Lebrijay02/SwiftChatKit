@@ -33,13 +33,14 @@ are marked `Not built yet` and will not compile.
 | Gemini backend | `ChatGemini` | ✅ Available |
 | File + shell tool providers | `ChatTools` | ✅ Available |
 | MCP client and manager | `ChatMCP` | ✅ Available |
-| SwiftUI Markdown renderer, agent cards | `ChatUI` | ⬜ Not built yet |
+| SwiftUI Markdown renderer, agent cards | `ChatUI` | ✅ Available |
 
 Every code sample in the "Available today" sections is compile-checked by
 `Tests/ChatCoreTests/READMEExamples.swift`,
 `Tests/ChatGeminiTests/READMEExamples.swift`,
-`Tests/ChatToolsTests/READMEExamples.swift` and
-`Tests/ChatMCPTests/READMEExamples.swift`, which import the modules the way a
+`Tests/ChatToolsTests/READMEExamples.swift`,
+`Tests/ChatMCPTests/READMEExamples.swift` and
+`Tests/ChatUITests/READMEExamples.swift`, which import the modules the way a
 consumer does. If a sample stops compiling, the build breaks.
 
 ---
@@ -82,6 +83,8 @@ targets: [
         .product(name: "SwiftChatKit", package: "SwiftChatKit"),
         // Or, bringing your own backend, the dependency-free core alone:
         // .product(name: "SwiftChatKitCore", package: "SwiftChatKit"),
+        // The SwiftUI layer is a separate product; the engine never requires it.
+        .product(name: "SwiftChatKitUI", package: "SwiftChatKit"),
     ])
 ]
 ```
@@ -201,7 +204,7 @@ MarkdownMath.looksLikeMath("x^2")   // false for "$5 and $10" — currency is no
 
 `MarkdownInline` and `MarkdownBlock` are `Equatable` and `Sendable`, and know
 nothing about fonts, colors or platforms. Turning them into an attributed string
-is the renderer's job (`ChatUI`, not yet built).
+is the renderer's job — see [Rendering](#rendering).
 
 ## `ChatValue` — the JSON type
 
@@ -837,6 +840,122 @@ quietly, and a crashed child looks exactly like a failed call until you try agai
 
 ---
 
+## Rendering
+
+`ChatUI` is a separate product (`SwiftChatKitUI`) and a separate target. The
+engine never imports it, so a headless host — a CLI, a server, a test — pays
+nothing for it.
+
+```swift
+import ChatUI
+
+ScrollView {
+    LazyVStack(alignment: .leading, spacing: 12) {
+        ForEach(messages) { message in
+            StreamingTextView(text: message.content)
+        }
+    }
+    .padding()
+}
+.chatPalette(.default)
+```
+
+`StreamingTextView` renders one message. It coalesces streaming deltas to one
+render per frame: text arrives at roughly 60 fps, and re-parsing the whole
+message on every token append is what makes a fast turn stutter.
+
+### One text storage per message
+
+Everything that can share a single text view does — headings, prose, lists,
+quotes, tables — so a drag selects across all of them in one gesture. Per-block
+SwiftUI views each own their own selection scope, which is why selection stops at
+every boundary when they are used instead.
+
+Fenced code blocks are the deliberate exception. Code cannot both scroll
+sideways and live in the message's text storage: TextKit gives one container one
+width, so a non-wrapping paragraph either clips or forces the whole message to
+scroll. Scrolling wins, because wrapped code misleads — a wrapped line looks like
+a new statement and indentation stops meaning anything. The cost is that a
+selection stops at a code block's edge.
+
+`MarkdownSegment.split` is where that trade is made, and it is testable on its
+own:
+
+```swift
+let segments = MarkdownSegment.split(MarkdownBlockParser.parse(text), style: style)
+```
+
+### Theming
+
+The renderer's entire theming surface is `ChatPalette`, injected through the
+environment. The default is built from system semantic colors, so a host that
+never sets one still gets a renderer that follows light and dark mode.
+
+```swift
+let palette = ChatPalette(
+    accent: .blue,
+    background: Color(white: 0.1),
+    codeBackground: Color(white: 0.16),
+    header: Color(white: 0.2),
+    divider: Color(white: 0.3),
+    outline: Color(white: 0.3),
+    primaryText: .white,
+    secondaryText: Color(white: 0.65))
+
+ChatView().chatPalette(palette)
+```
+
+`MarkdownStyle.from(palette:appearanceIsDark:)` resolves a palette into the
+concrete fonts and colors the builder works in. It is needed because the builder
+runs below SwiftUI and cannot resolve a `Color` itself. To render Markdown
+outside a view hierarchy entirely:
+
+```swift
+let style = MarkdownStyle.from(palette: .default, appearanceIsDark: false)
+let result = MarkdownAttributedBuilder.build(MarkdownBlockParser.parse(text), style: style)
+result.attributed     // NSAttributedString
+result.codeRegions    // where the fenced blocks landed
+```
+
+### Agent cards
+
+| View | Shows |
+|---|---|
+| `PermissionRequestView` | A pending approval. Renders a real diff for `writeFile` / `editFile` rather than raw JSON arguments — an edit should be judged on what it changes. |
+| `QuestionCardView` | The `askUser` questions, paged one at a time, with options and a free-text "Other". `assistantName` supplies the title, since the package has no product name of its own. |
+| `TodoListPanelView` | The agent's task list. Collapsed it shows only the task in progress. |
+| `FileDiffPreviewView` | A GitHub-style diff with line numbers, used by the approval card and usable on its own. |
+| `JumpToBottomButton` | Offered while the reader is scrolled up during a turn. |
+
+### Auto-scroll
+
+`ChatAutoScrollController` is the follow/disengage state machine, separated from
+any view so it can be tested:
+
+```swift
+let controller = ChatAutoScrollController()
+controller.reportDistanceFromBottom(distance)
+controller.followStream(proxy, anchor: "bottom")   // per streaming update
+controller.followEvent(proxy, anchor: "bottom")    // per new message
+```
+
+Following is unanimated at frame rate, because the deltas are line-sized and
+animating each step is what causes the lurch. Only a large jump — a restored
+session, a big code block — is animated. Scrolling up disengages following
+entirely; returning to the bottom re-arms it, which is what makes a manual
+scroll-up stick instead of yanking the reader back down.
+
+### Platforms
+
+Both platforms are supported from one source. AppKit and UIKit differences are
+funnelled through `Platform.swift`, and the two places they genuinely diverge are
+called out where they happen: macOS lays out GFM tables with `NSTextTable`, which
+UIKit has no equivalent for and where tab stops stand in; and the scroll-wheel
+monitor that detects manual scrolling is macOS-only, since iOS surfaces drags
+through the gesture system.
+
+---
+
 ## Implementing the seams
 
 Everything host-specific plugs in here. These protocols exist and compile today;
@@ -986,8 +1105,7 @@ than reporting a success that changed nothing.
 
 # Not built yet
 
-Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`) and the
-SwiftUI renderer and agent cards (`ChatUI`).
+Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`).
 
 ---
 
@@ -998,7 +1116,7 @@ swift build
 swift test
 ```
 
-Currently 254 tests across 40 suites. The Markdown suites are ported verbatim
+Currently 289 tests across 46 suites. The Markdown suites are ported verbatim
 from the originating app — that equivalence is the primary regression signal for
 the parser.
 

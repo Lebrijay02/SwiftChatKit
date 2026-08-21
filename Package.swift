@@ -10,6 +10,8 @@ let package = Package(
         .library(name: "SwiftChatKit", targets: ["ChatCore", "ChatTools", "ChatMCP", "ChatGemini"]),
         // The core alone, for hosts bringing their own backend.
         .library(name: "SwiftChatKitCore", targets: ["ChatCore"]),
+        // Optional SwiftUI layer: Markdown renderer and agent cards.
+        .library(name: "SwiftChatKitUI", targets: ["ChatUI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/firebase/firebase-ios-sdk", from: "12.14.0"),
@@ -41,6 +43,11 @@ let package = Package(
         .target(name: "ChatMCP",
                 dependencies: ["ChatCore", .product(name: "MCP", package: "swift-sdk")]),
         .testTarget(name: "ChatMCPTests", dependencies: ["ChatMCP"]),
+
+        // SwiftUI renderer and agent cards. Depends on ChatCore only — the UI
+        // never needs to know which backend or tools are in play.
+        .target(name: "ChatUI", dependencies: ["ChatCore"]),
+        .testTarget(name: "ChatUITests", dependencies: ["ChatUI"]),
     ],
     swiftLanguageModes: [.v6]
 )

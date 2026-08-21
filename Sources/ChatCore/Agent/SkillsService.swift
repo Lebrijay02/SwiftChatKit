@@ -63,11 +63,18 @@ public struct SkillsConfiguration: Sendable {
     }
 
     /// The Claude Code layout: `~/.claude/skills` plus `<project>/.claude/skills`.
+    ///
+    /// There is no user home directory on iOS, so only the project half applies
+    /// there — a sandboxed app has nowhere global to read skills from anyway.
     public static var claudeCompatible: SkillsConfiguration {
+        #if os(macOS)
         SkillsConfiguration(
             globalDirectory: FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".claude/skills", isDirectory: true),
             projectRelativePath: ".claude/skills")
+        #else
+        SkillsConfiguration(projectRelativePath: ".claude/skills")
+        #endif
     }
 
     public static let disabled = SkillsConfiguration(isEnabled: false)
