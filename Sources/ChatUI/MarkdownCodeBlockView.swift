@@ -196,6 +196,11 @@ private struct CodeScrollView {
         ]), paragraph)
     }
 
+    /// An "unbounded" container. `greatestFiniteMagnitude` overflows TextKit's own
+    /// arithmetic on UIKit and lays out nothing past the first fragment, so the bound is
+    /// large but finite — no code block is a million points wide.
+    static let unbounded = CGSize(width: 1_000_000, height: 1_000_000)
+
     func measure(layoutManager: NSLayoutManager,
                  container: NSTextContainer,
                  paragraph: NSParagraphStyle) -> (CGSize, CGFloat) {
@@ -228,8 +233,7 @@ extension CodeScrollView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
 
-        let container = NSTextContainer(size: CGSize(width: CGFloat.greatestFiniteMagnitude,
-                                                    height: CGFloat.greatestFiniteMagnitude))
+        let container = NSTextContainer(size: Self.unbounded)
         container.widthTracksTextView = false
         container.lineFragmentPadding = 0
 
@@ -287,8 +291,7 @@ extension CodeScrollView: UIViewRepresentable {
         scrollView.alwaysBounceVertical = false
         scrollView.backgroundColor = .clear
 
-        let container = NSTextContainer(size: CGSize(width: CGFloat.greatestFiniteMagnitude,
-                                                    height: CGFloat.greatestFiniteMagnitude))
+        let container = NSTextContainer(size: Self.unbounded)
         container.widthTracksTextView = false
         container.lineFragmentPadding = 0
 
@@ -316,6 +319,11 @@ extension CodeScrollView: UIViewRepresentable {
               let container = textView.textContainer as NSTextContainer?
         else { return }
         let layoutManager = textView.layoutManager
+
+        // A non-scrolling UITextView clamps its container to its own bounds on every
+        // layout pass. The frame starts at zero, so without restoring the container the
+        // measurement below only ever sees the first line.
+        container.size = Self.unbounded
 
         let (string, paragraph) = attributed()
         if !textView.textStorage.matchesChat(string) {
