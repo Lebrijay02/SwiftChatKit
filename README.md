@@ -1127,6 +1127,10 @@ renderer, the permission card and the auto-scroll. Drop a plist in and it uses
 `EchoBackend.swift` is worth reading on its own — it is the shortest possible
 answer to what a backend has to do.
 
+There is no iOS demo yet. `Examples/iOS-Example-Handoff.md` is the brief for
+building one: which products to depend on, which pieces compile away on iOS
+(shell tools, MCP stdio, the scroll-wheel reporter), and the acceptance list.
+
 ---
 
 ## Building and testing
@@ -1135,8 +1139,10 @@ answer to what a backend has to do.
 swift build
 swift test
 
-# iOS, which the Markdown renderer and the HTTP MCP transport both support.
-xcodebuild -scheme SwiftChatKitUI -destination 'generic/platform=iOS' build
+# iOS. The whole package builds; the shell tools and the MCP stdio transport
+# compile away to nothing there. `swift build --triple …ios…` silently uses the
+# macOS SDK, so a destination is required.
+xcodebuild -scheme SwiftChatKit -destination 'generic/platform=iOS' build
 
 # The demo, as an external consumer.
 swift build --package-path Examples/ChatDemo
