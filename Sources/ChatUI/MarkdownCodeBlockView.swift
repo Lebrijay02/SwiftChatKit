@@ -170,6 +170,16 @@ private struct CodeScrollView {
     let textColor: PlatformColor
     let onMeasure: (CGSize, CGFloat) -> Void
 
+    /// TextKit 1 ownership runs storage -> layout manager -> container, and the
+    /// back-references are weak. The text view here is a stock one with nowhere to
+    /// hang the stack, so the coordinator holds it for the lifetime of the view.
+    final class TextKitStack {
+        var storage: NSTextStorage?
+        var layoutManager: NSLayoutManager?
+    }
+
+    func makeCoordinator() -> TextKitStack { TextKitStack() }
+
     /// The attributed form and its measured size. Shared so both platform bridges
     /// lay the code out identically.
     func attributed() -> (NSAttributedString, NSParagraphStyle) {
@@ -228,6 +238,9 @@ extension CodeScrollView: NSViewRepresentable {
         let storage = NSTextStorage()
         storage.addLayoutManager(layoutManager)
 
+        context.coordinator.storage = storage
+        context.coordinator.layoutManager = layoutManager
+
         let textView = NSTextView(frame: .zero, textContainer: container)
         textView.isEditable = false
         textView.isSelectable = true
@@ -283,6 +296,9 @@ extension CodeScrollView: UIViewRepresentable {
         layoutManager.addTextContainer(container)
         let storage = NSTextStorage()
         storage.addLayoutManager(layoutManager)
+
+        context.coordinator.storage = storage
+        context.coordinator.layoutManager = layoutManager
 
         let textView = UITextView(frame: .zero, textContainer: container)
         textView.isEditable = false

@@ -88,6 +88,11 @@ public final class MarkdownNSTextView: NSTextView {
 
     var style: MarkdownStyle?
 
+    /// TextKit 1 ownership runs storage -> layout manager -> container, and the
+    /// back-references are weak. The view has to keep the top of that chain alive.
+    var chatTextStorage: NSTextStorage?
+    var chatLayoutManager: NSLayoutManager?
+
     override public func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
         guard let style, let layoutManager, let textContainer, let textStorage else { return }
@@ -112,10 +117,10 @@ public struct MarkdownTextViewRepresentable: NSViewRepresentable {
 
     public func makeNSView(context: Context) -> MarkdownNSTextView {
         let (storage, layoutManager, container) = makeTextKitStack()
-        _ = storage
 
         let textView = MarkdownNSTextView(frame: .zero, textContainer: container)
-        _ = layoutManager
+        textView.chatTextStorage = storage
+        textView.chatLayoutManager = layoutManager
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -165,6 +170,11 @@ public final class MarkdownUITextView: UITextView {
 
     var style: MarkdownStyle?
 
+    /// TextKit 1 ownership runs storage -> layout manager -> container, and the
+    /// back-references are weak. The view has to keep the top of that chain alive.
+    var chatTextStorage: NSTextStorage?
+    var chatLayoutManager: NSLayoutManager?
+
     override public func draw(_ rect: CGRect) {
         guard let style, let container = textContainer as NSTextContainer? else {
             super.draw(rect)
@@ -191,9 +201,11 @@ public struct MarkdownTextViewRepresentable: UIViewRepresentable {
     }
 
     public func makeUIView(context: Context) -> MarkdownUITextView {
-        let (_, _, container) = makeTextKitStack()
+        let (storage, layoutManager, container) = makeTextKitStack()
 
         let textView = MarkdownUITextView(frame: .zero, textContainer: container)
+        textView.chatTextStorage = storage
+        textView.chatLayoutManager = layoutManager
         textView.isEditable = false
         textView.isSelectable = true
         textView.isScrollEnabled = false     // the transcript scrolls, not the message
