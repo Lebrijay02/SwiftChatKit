@@ -1109,11 +1109,37 @@ Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`).
 
 ---
 
+## The demo app
+
+`Examples/ChatDemo` is a standalone macOS app — a separate package that depends
+on SwiftChatKit **by path, the way a real consumer would**. If it builds, the
+package stands on its own rather than only inside its own test target.
+
+```sh
+swift run --package-path Examples/ChatDemo
+```
+
+It needs no credentials: with no `GoogleService-Info.plist` present it falls back
+to an `EchoBackend` that streams a canned reply, which is enough to drive the
+renderer, the permission card and the auto-scroll. Drop a plist in and it uses
+`GeminiBackend` instead.
+
+`EchoBackend.swift` is worth reading on its own — it is the shortest possible
+answer to what a backend has to do.
+
+---
+
 ## Building and testing
 
 ```sh
 swift build
 swift test
+
+# iOS, which the Markdown renderer and the HTTP MCP transport both support.
+xcodebuild -scheme SwiftChatKitUI -destination 'generic/platform=iOS' build
+
+# The demo, as an external consumer.
+swift build --package-path Examples/ChatDemo
 ```
 
 Currently 289 tests across 46 suites. The Markdown suites are ported verbatim
