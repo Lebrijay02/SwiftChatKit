@@ -146,8 +146,11 @@ public actor MCPManager: ToolProvider {
     /// stays out of `connect`.
     private struct Connection {
         let transport: any Transport
+        // Only stdio servers have a child to own, and stdio is macOS-only.
+        #if os(macOS)
         var process: Process?
         var stderr: OutputCollector?
+        #endif
         /// Run if the handshake misses its deadline. A stdio child can stay
         /// alive and silent, in which case the transport read never returns and
         /// only killing the process unblocks it.
@@ -191,11 +194,15 @@ public actor MCPManager: ToolProvider {
         }
         statuses[config.id] = MCPServerStatus(id: config.id, name: config.name, state: .connecting)
 
-        var stderr: OutputCollector?
+        // Captured for the catch below. Only stdio servers have a stderr to
+        // read, and stdio is macOS-only.
+        #if os(macOS)
+        var collector: OutputCollector?
+        #endif
         do {
             let connection = try await makeConnection(for: config)
-            stderr = connection.stderr
             #if os(macOS)
+            collector = connection.stderr
             processes[config.id] = connection.process
             #endif
 
@@ -217,7 +224,10 @@ public actor MCPManager: ToolProvider {
 
             // A server that dies during the handshake usually explains itself
             // only on stderr, so fold that into the message the user sees.
-            let details = stderr?.text ?? ""
+            var details = ""
+            #if os(macOS)
+            details = collector?.text ?? ""
+            #endif
             let message = details.isEmpty
                 ? error.localizedDescription
                 : "\(error.localizedDescription) — stderr: \(details)"
