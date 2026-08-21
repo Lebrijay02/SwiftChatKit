@@ -250,6 +250,8 @@ func readme_prompt() {
     persona.identity = "You are Acme Helper, Acme's assistant for the Acme SDK."
     persona.additionalBlocks = ["\n# House rules\nAlways prefer the Acme SDK."]
     _ = ChatPersona.minimal
+    _ = ChatPersona.codingAgent
+    persona.fileOperations = ChatPersona.fileOperationsBlock
     _ = ChatPersona(identity: "You answer questions.", code: nil,
                     fileOperations: nil, runningCommands: nil, taskManagement: nil)
 

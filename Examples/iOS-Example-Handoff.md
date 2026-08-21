@@ -17,16 +17,19 @@ ships alongside it.
 Repo: `/Users/juan.lebrija/Desktop/Softtek/Packages/SwiftChatKit` (private,
 `main`). Depend on it by path or by URL.
 
-Two products:
+One product per capability — nothing arrives unless you ask for it:
 
-| Product | Targets | Use it for |
+| Product | Target | Use it for |
 |---|---|---|
-| `SwiftChatKit` | `ChatCore`, `ChatTools`, `ChatMCP`, `ChatGemini` | the engine, tools, MCP, the Gemini backend |
+| `SwiftChatKit` | `ChatCore` | the engine: models, agent loop, seams. Zero external dependencies |
+| `SwiftChatKitGemini` | `ChatGemini` | the Gemini backend (pulls in Firebase) |
+| `SwiftChatKitTools` | `ChatTools` | the file and shell tool providers |
+| `SwiftChatKitMCP` | `ChatMCP` | MCP servers as tools (pulls in the MCP SDK) |
 | `SwiftChatKitUI` | `ChatUI` | Markdown renderer, permission/question/todo cards, auto-scroll |
 
-`SwiftChatKitCore` (`ChatCore` alone, zero external dependencies) also exists if
-you want the engine without Firebase or the MCP SDK pulled in. For this example,
-take both `SwiftChatKit` and `SwiftChatKitUI`.
+Each capability product re-exports `ChatCore`, so `import ChatGemini` is enough
+on its own. For this example, take `SwiftChatKitGemini`, `SwiftChatKitTools` and
+`SwiftChatKitUI`.
 
 Minimum platforms: macOS 14, iOS 17. Swift tools 6.2, Swift 6 language mode —
 your example target should also use `swiftLanguageModes: [.v6]` so strict
@@ -62,8 +65,11 @@ of sample files at first launch so the file tools have something to find.
 let session = ChatSession(configuration: .init(
     backend: backend,                                  // any ChatBackend
     toolProviders: [FileToolProvider(fileSystem: fs)],  // no ShellToolProvider on iOS
+    persona: .codingAgent,       // the tool-aware persona; `.default` describes no tools
     workingDirectory: documentsURL,
     skills: .disabled,
+    enableTodos: true,           // off by default — nothing is pre-set
+    enableQuestions: true,
     historyStore: .applicationSupport("ChatDemoiOS"),
     autoAllowedTools: FileToolProvider.readOnlyNames,
     permissionStore: EphemeralPermissionStore()))

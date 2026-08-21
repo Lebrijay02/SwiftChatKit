@@ -38,7 +38,13 @@ struct ChatDemoApp: App {
                 FileToolProvider(fileSystem: fileSystem),
                 ShellToolProvider(),
             ],
+            // Nothing is on by default, so a host opts into exactly what it
+            // installed: the coding persona describes the file and shell tools
+            // above, and the todo checklist is asked for explicitly.
+            persona: .codingAgent,
             workingDirectory: workingDirectory,
+            enableTodos: true,
+            enableQuestions: true,
             // Read-only tools run unprompted; everything that writes or executes
             // stops for approval, which is what the permission card is for.
             autoAllowedTools: FileToolProvider.readOnlyNames,

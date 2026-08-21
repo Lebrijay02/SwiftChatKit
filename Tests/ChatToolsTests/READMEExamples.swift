@@ -13,7 +13,7 @@ import ChatTools
 
 private enum BuiltInToolExamples {
 
-    /// From "## Built-in tools".
+    /// From "## The file and shell tools".
     static func configure(backend: any ChatBackend, projectURL: URL) -> ChatSessionConfiguration {
         ChatSessionConfiguration(
             backend: backend,
@@ -21,6 +21,7 @@ private enum BuiltInToolExamples {
                 FileToolProvider(fileSystem: LocalFileSystem(root: projectURL)),
                 ShellToolProvider()
             ],
+            persona: .codingAgent,
             workingDirectory: projectURL)
     }
 

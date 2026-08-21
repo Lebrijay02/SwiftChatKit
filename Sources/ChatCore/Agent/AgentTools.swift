@@ -19,8 +19,9 @@ public enum AgentTools {
     public static let exitPlanMode = "exitPlanMode"
     public static let askUser = "askUser"
 
-    /// Names handled by the session itself. The dispatch loop checks this before
-    /// consulting any provider, so a provider cannot shadow them.
+    /// Every name the session can handle itself. Whichever of them are enabled
+    /// are dispatched before any provider is consulted, so a provider cannot
+    /// shadow them — but none of them are offered unless the host asks.
     public static let allNames: Set<String> = [todoWrite, exitPlanMode, askUser]
 
     public static let todoWriteDeclaration = ToolDeclaration(

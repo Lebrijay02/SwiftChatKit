@@ -373,7 +373,7 @@ public final class ChatSession {
                 continue
             }
 
-            if AgentTools.allNames.contains(call.name) {
+            if enabledAgentToolNames.contains(call.name) {
                 results[index] = await runAgentTool(call)
                 continue
             }
@@ -468,6 +468,17 @@ public final class ChatSession {
     }
 
     // MARK: - Session-owned tools
+
+    /// Only the session tools currently offered. A disabled one falls through to
+    /// the providers and then to `unhandled`, so a model that invented the name
+    /// can't reach state the host switched off.
+    private var enabledAgentToolNames: Set<String> {
+        var names: Set<String> = []
+        if configuration.enableTodos { names.insert(AgentTools.todoWrite) }
+        if configuration.enableQuestions { names.insert(AgentTools.askUser) }
+        if planMode { names.insert(AgentTools.exitPlanMode) }
+        return names
+    }
 
     private func runAgentTool(_ call: ToolCall) async -> ToolResult {
         switch call.name {

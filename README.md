@@ -8,6 +8,11 @@ The design goal is portability: `ChatCore` has **zero external dependencies**,
 and nothing app-specific lives in the package. Domain tools, telemetry, theming
 and context compression all arrive through protocols the host conforms to.
 
+**Nothing is pre-set.** A fresh session ships no tools — no files, no shell, no
+MCP, not even the todo checklist — and a persona that describes none. Every
+capability is its own product you opt into, so what the model can do is exactly
+what you wired up.
+
 ---
 
 ## ⚠️ Status: under construction
@@ -59,11 +64,11 @@ Strict concurrency is not optional here. Types that cross the tool boundary
 `Attachment`) are all `Sendable`; `ToolProvider` and `ChatBackend` are `Sendable`
 protocols, so conformers are typically `actor`s or `@MainActor` classes.
 
-Dependencies are per-module. `ChatGemini` pulls in `firebase-ios-sdk`
-(`FirebaseAILogic`); `ChatMCP` pulls in `modelcontextprotocol/swift-sdk`,
+Dependencies are per-product. `SwiftChatKitGemini` pulls in `firebase-ios-sdk`
+(`FirebaseAILogic`); `SwiftChatKitMCP` pulls in `modelcontextprotocol/swift-sdk`,
 though only for its transports — the JSON-RPC handshake is driven by hand.
-Neither affects consumers of the `SwiftChatKitCore` product,
-which is `ChatCore` alone with no external dependencies.
+Neither affects consumers of `SwiftChatKit` itself, which is `ChatCore` alone
+with no external dependencies.
 
 Using `ChatGemini` additionally requires a Firebase project with Vertex AI
 enabled, a `GoogleService-Info.plist` in the host app, and a
@@ -79,21 +84,33 @@ dependencies: [
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
-        // Engine + Gemini backend.
+        // The engine. On its own: a chat with no tools and no backend.
         .product(name: "SwiftChatKit", package: "SwiftChatKit"),
-        // Or, bringing your own backend, the dependency-free core alone:
-        // .product(name: "SwiftChatKitCore", package: "SwiftChatKit"),
-        // The SwiftUI layer is a separate product; the engine never requires it.
+        // Then one product per capability you actually want. Skip any of them
+        // and neither its code nor its dependencies enter your build.
+        .product(name: "SwiftChatKitGemini", package: "SwiftChatKit"),
+        .product(name: "SwiftChatKitTools", package: "SwiftChatKit"),
+        .product(name: "SwiftChatKitMCP", package: "SwiftChatKit"),
         .product(name: "SwiftChatKitUI", package: "SwiftChatKit"),
     ])
 ]
 ```
 
+| Product | Target | Brings |
+|---|---|---|
+| `SwiftChatKit` | `ChatCore` | The engine. No dependencies, no tools, no backend |
+| `SwiftChatKitGemini` | `ChatGemini` | The Gemini backend (`firebase-ios-sdk`) |
+| `SwiftChatKitTools` | `ChatTools` | The file and shell tool providers |
+| `SwiftChatKitMCP` | `ChatMCP` | MCP servers as tools (`swift-sdk`) |
+| `SwiftChatKitUI` | `ChatUI` | The SwiftUI renderer and agent cards |
+
 In Xcode: **File → Add Package Dependencies → Add Local…** and pick the package
 directory.
 
+Each capability module re-exports `ChatCore`, so one import is enough:
+
 ```swift
-import ChatCore
+import ChatGemini   // ChatCore comes with it
 ```
 
 ---
@@ -101,19 +118,32 @@ import ChatCore
 ## Quickstart
 
 Everything is configured once; after that a host only calls `send` / `stop` and
-reads `messages`.
+reads `messages`. A backend is the only requirement — this is the whole of a
+working chat, and it has no tools at all:
 
 ```swift
-import ChatCore
+import ChatGemini
+
+let session = ChatSession(configuration: ChatSessionConfiguration(
+    backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash))))
+```
+
+From there you add capabilities one at a time, and only what you add exists:
+
+```swift
 import ChatGemini
 
 let session = ChatSession(configuration: ChatSessionConfiguration(
     backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash)),
     toolProviders: [MyToolProvider()],
-    persona: .default,
+    // `.default` describes no tools. Switch to the persona that matches what
+    // you installed, or edit the blocks yourself.
+    persona: .codingAgent,
     workingDirectory: projectURL,
     skills: .claudeCompatible,
     maxTurns: 100,
+    enableTodos: true,
+    enableQuestions: true,
     historyStore: .applicationSupport("MyApp"),
     telemetry: MyTelemetry(),
     onRunFinished: { outcome in
@@ -524,13 +554,17 @@ let prompt = SystemPromptBuilder.build(SystemPromptContext(
 
 Blocks: `identity`, `communication`, `code`, `fileOperations`,
 `runningCommands`, `taskManagement`, `doingTasks`. All but the first two are
-optional — set one to `nil` and it disappears. Drop the tool blocks when you
-haven't installed the matching providers, so the prompt never advertises tools
-that don't exist.
+optional — set one to `nil` and it disappears. The tool blocks default to `nil`,
+matching the session's default of no tools: a prompt that describes a file tool
+to a session that has none teaches the model to call something that isn't there.
 
 ```swift
-ChatPersona.default   // every block — a general-purpose coding assistant
-ChatPersona.minimal   // identity + communication only
+ChatPersona.default      // neutral assistant, no tool or code guidance
+ChatPersona.minimal      // identity + communication only
+ChatPersona.codingAgent  // every block — pair with the file, shell and todo tools
+
+var persona = ChatPersona.default
+persona.fileOperations = ChatPersona.fileOperationsBlock   // add back one at a time
 ```
 
 **The defaults ship no host-specific identity.** A test asserts the assembled
@@ -640,13 +674,19 @@ Behaviours worth knowing, because they are what the loop's tests pin down:
 ### Tools the session owns
 
 Three tools act on the session's own state, so they are implemented by the
-session rather than by a provider, and a provider cannot shadow them:
+session rather than by a provider, and a provider cannot shadow them. Like
+everything else, none of them are on unless you say so:
 
 | Tool | Effect | Offered when |
 |---|---|---|
-| `todoWrite` | Replaces `session.todos` | `enableTodos` (default on) |
-| `askUser` | Parks the loop on `questions.pending` | `enableQuestions` (default on) |
+| `todoWrite` | Replaces `session.todos` | `enableTodos` (default **off**) |
+| `askUser` | Parks the loop on `questions.pending` | `enableQuestions` (default **off**) |
 | `exitPlanMode` | Asks for approval, then turns plan mode off | only in plan mode |
+
+A disabled one isn't merely withheld from the tool list: a model that calls the
+name anyway gets "no tool named that", so it cannot reach state the host
+switched off. Enable `askUser` only if you render `questions.pending` — a
+question nobody displays parks the run forever.
 
 None of them prompt for permission — a confirmation dialog for "update the
 checklist" is noise. `useSkill` is added automatically when any skill is
@@ -675,10 +715,11 @@ unanswered call (it would make the next send invalid).
 
 ---
 
-## Built-in tools
+## The file and shell tools
 
-`ChatTools` ships the file and shell providers. Both are plain `ToolProvider`s —
-you list them in the configuration, and nothing else changes.
+`SwiftChatKitTools` is the product that ships the file and shell providers.
+Nothing installs them for you — they are plain `ToolProvider`s you list in the
+configuration, and a session that doesn't list them cannot touch a disk.
 
 ```swift
 import ChatTools
@@ -689,6 +730,7 @@ let session = ChatSession(configuration: .init(
         FileToolProvider(fileSystem: LocalFileSystem(root: projectURL)),
         ShellToolProvider()
     ],
+    persona: .codingAgent,   // the prompt guidance that matches these two
     workingDirectory: projectURL))
 ```
 
@@ -842,7 +884,7 @@ quietly, and a crashed child looks exactly like a failed call until you try agai
 
 ## Rendering
 
-`ChatUI` is a separate product (`SwiftChatKitUI`) and a separate target. The
+`ChatUI` is its own product (`SwiftChatKitUI`) and its own target. The
 engine never imports it, so a headless host — a CLI, a server, a test — pays
 nothing for it.
 

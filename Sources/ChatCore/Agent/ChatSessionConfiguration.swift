@@ -44,9 +44,11 @@ public struct ChatSessionConfiguration: Sendable {
     /// and stops — a model in a loop should cost a bounded amount of money.
     public var maxTurns: Int
 
-    /// Offers `todoWrite`. Turn off for a chat that has no multi-step work.
+    /// Offers `todoWrite`. Off by default: a session ships no tools it wasn't
+    /// asked for, and a chat with no multi-step work has no use for a checklist.
     public var enableTodos: Bool
-    /// Offers `askUser`. Requires the host to render `questions.pending`.
+    /// Offers `askUser`. Off by default, and requires the host to render
+    /// `questions.pending` — a question nobody displays parks the run forever.
     public var enableQuestions: Bool
 
     /// Tools that never prompt for approval. Merged with every provider's
@@ -73,8 +75,8 @@ public struct ChatSessionConfiguration: Sendable {
                 workingDirectory: URL? = nil,
                 skills: SkillsConfiguration = .disabled,
                 maxTurns: Int = 100,
-                enableTodos: Bool = true,
-                enableQuestions: Bool = true,
+                enableTodos: Bool = false,
+                enableQuestions: Bool = false,
                 autoAllowedTools: Set<String> = [],
                 permissionStore: any PermissionStore = UserDefaultsPermissionStore(),
                 historyStore: ChatHistoryStore? = nil,

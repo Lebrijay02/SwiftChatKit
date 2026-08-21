@@ -15,7 +15,11 @@ let package = Package(
         .executableTarget(
             name: "ChatDemo",
             dependencies: [
+                // One product per capability: the engine, then only the
+                // backend, tools and UI this demo actually uses.
                 .product(name: "SwiftChatKit", package: "SwiftChatKit"),
+                .product(name: "SwiftChatKitGemini", package: "SwiftChatKit"),
+                .product(name: "SwiftChatKitTools", package: "SwiftChatKit"),
                 .product(name: "SwiftChatKitUI", package: "SwiftChatKit"),
             ]),
     ],

@@ -6,11 +6,16 @@ let package = Package(
     name: "SwiftChatKit",
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
-        // Headless engine: models, agent loop, tools, backends. No UI.
-        .library(name: "SwiftChatKit", targets: ["ChatCore", "ChatTools", "ChatMCP", "ChatGemini"]),
-        // The core alone, for hosts bringing their own backend.
-        .library(name: "SwiftChatKitCore", targets: ["ChatCore"]),
-        // Optional SwiftUI layer: Markdown renderer and agent cards.
+        // The engine: models, agent loop, protocol seams. No backend, no tools,
+        // no UI — a host that takes only this gets a chat with nothing wired in
+        // and decides for itself what to add.
+        .library(name: "SwiftChatKit", targets: ["ChatCore"]),
+
+        // Every capability is its own product, so nothing arrives unasked. Each
+        // re-exports ChatCore, so one import is enough.
+        .library(name: "SwiftChatKitGemini", targets: ["ChatGemini"]),
+        .library(name: "SwiftChatKitTools", targets: ["ChatTools"]),
+        .library(name: "SwiftChatKitMCP", targets: ["ChatMCP"]),
         .library(name: "SwiftChatKitUI", targets: ["ChatUI"]),
     ],
     dependencies: [

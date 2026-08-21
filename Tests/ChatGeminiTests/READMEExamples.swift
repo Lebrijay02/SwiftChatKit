@@ -56,13 +56,19 @@ private struct MyTelemetry: ChatTelemetry {
 
 @MainActor
 private func readmeQuickstart(projectURL: URL, data: Data, storedSession: StoredSession) {
+    // The minimal configuration from the top of "## Quickstart".
+    _ = ChatSession(configuration: ChatSessionConfiguration(
+        backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash))))
+
     let session = ChatSession(configuration: ChatSessionConfiguration(
         backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash)),
         toolProviders: [MyToolProvider()],
-        persona: .default,
+        persona: .codingAgent,
         workingDirectory: projectURL,
         skills: .claudeCompatible,
         maxTurns: 100,
+        enableTodos: true,
+        enableQuestions: true,
         historyStore: .applicationSupport("MyApp"),
         telemetry: MyTelemetry(),
         onRunFinished: { outcome in

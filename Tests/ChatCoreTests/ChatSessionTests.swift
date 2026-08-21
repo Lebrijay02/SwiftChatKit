@@ -17,12 +17,15 @@ private func makeSession(
     providers: [any ToolProvider] = [],
     maxTurns: Int = 100,
     compressor: (any ContextCompressor)? = nil,
+    sessionTools: Bool = false,
     recorder: RunRecorder
 ) -> ChatSession {
     ChatSession(configuration: ChatSessionConfiguration(
         backend: backend,
         toolProviders: providers,
         maxTurns: maxTurns,
+        enableTodos: sessionTools,
+        enableQuestions: sessionTools,
         permissionStore: EphemeralPermissionStore(),
         compressor: compressor,
         onRunFinished: { [recorder] outcome in recorder.record(outcome) }))
@@ -367,7 +370,7 @@ struct AgentToolTests {
             ])), .finish(.stop)],
             [.text("Working."), .finish(.stop)],
         ])
-        let session = makeSession(backend: backend, recorder: recorder)
+        let session = makeSession(backend: backend, sessionTools: true, recorder: recorder)
 
         session.send("do the thing")
         #expect(await Wait.runs(recorder))
@@ -385,7 +388,7 @@ struct AgentToolTests {
             [.toolCall(ToolCall(id: "t", name: AgentTools.todoWrite)), .finish(.stop)],
             [.text("ok"), .finish(.stop)],
         ])
-        let session = makeSession(backend: backend, recorder: recorder)
+        let session = makeSession(backend: backend, sessionTools: true, recorder: recorder)
 
         session.send("go")
         #expect(await Wait.runs(recorder))
@@ -409,7 +412,7 @@ struct AgentToolTests {
             ])), .finish(.stop)],
             [.text("Using Postgres."), .finish(.stop)],
         ])
-        let session = makeSession(backend: backend, recorder: recorder)
+        let session = makeSession(backend: backend, sessionTools: true, recorder: recorder)
 
         session.send("build it")
         #expect(await Wait.until { session.questions.pending != nil })
@@ -431,7 +434,7 @@ struct AgentToolTests {
             ])), .finish(.stop)],
             [.text("Picking a default."), .finish(.stop)],
         ])
-        let session = makeSession(backend: backend, recorder: recorder)
+        let session = makeSession(backend: backend, sessionTools: true, recorder: recorder)
 
         session.send("build it")
         #expect(await Wait.until { session.questions.pending != nil })
@@ -454,7 +457,7 @@ struct SessionConfigurationTests {
         let recorder = RunRecorder()
         let backend = MockBackend()
         let session = makeSession(backend: backend, providers: [MockProvider.readFile()],
-                                  recorder: recorder)
+                                  sessionTools: true, recorder: recorder)
 
         session.send("hi")
         #expect(await Wait.runs(recorder))
@@ -465,6 +468,37 @@ struct SessionConfigurationTests {
         #expect(names.contains(AgentTools.askUser))
         // Not in plan mode, so the exit tool is withheld.
         #expect(names.contains(AgentTools.exitPlanMode) == false)
+    }
+
+    @Test("A session with no providers offers no tools at all")
+    func blankCanvas() async {
+        let recorder = RunRecorder()
+        let backend = MockBackend()
+        let session = makeSession(backend: backend, recorder: recorder)
+
+        session.send("hi")
+        #expect(await Wait.runs(recorder))
+
+        #expect(await backend.configuredTools.isEmpty)
+    }
+
+    @Test("A disabled session tool is not dispatched even if the model calls it")
+    func disabledSessionTool() async {
+        let recorder = RunRecorder()
+        let backend = MockBackend(script: [
+            [.toolCall(ToolCall(id: "t", name: AgentTools.todoWrite, arguments: [
+                "todos": .array([.object(["content": "Sneak in", "status": "pending"])]),
+            ])), .finish(.stop)],
+            [.text("ok"), .finish(.stop)],
+        ])
+        let session = makeSession(backend: backend, recorder: recorder)
+
+        session.send("go")
+        #expect(await Wait.runs(recorder))
+
+        #expect(session.todos.isEmpty)
+        let result = session.messages.first { $0.role == .toolResult(toolName: AgentTools.todoWrite) }
+        #expect(result?.rawResult?["error"]?.stringValue?.contains("No tool named") == true)
     }
 
     @Test("The model is rebuilt only when its inputs change")

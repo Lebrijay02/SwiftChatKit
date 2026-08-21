@@ -375,9 +375,22 @@ struct ChatHistoryStoreTests {
 @Suite("System prompt assembly")
 struct SystemPromptTests {
 
-    @Test("The default persona includes every standing block")
+    @Test("The default persona describes no tools")
     func defaultPersona() {
         let prompt = SystemPromptBuilder.build(SystemPromptContext())
+        #expect(prompt.contains("# Communication"))
+        #expect(prompt.contains("# Doing tasks"))
+        // The default session installs no providers, so the prompt must not
+        // advertise tools that aren't there.
+        #expect(!prompt.contains("# Code"))
+        #expect(!prompt.contains("# Working with files"))
+        #expect(!prompt.contains("# Running commands"))
+        #expect(!prompt.contains("# Task management"))
+    }
+
+    @Test("The coding-agent persona includes every standing block")
+    func codingAgentPersona() {
+        let prompt = SystemPromptBuilder.build(SystemPromptContext(persona: .codingAgent))
         #expect(prompt.contains("# Communication"))
         #expect(prompt.contains("# Code"))
         #expect(prompt.contains("# Working with files"))

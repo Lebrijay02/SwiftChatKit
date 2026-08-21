@@ -38,13 +38,16 @@ public struct ChatPersona: Sendable, Equatable {
     /// Appended verbatim after the standing blocks.
     public var additionalBlocks: [String]
 
+    /// The tool-guidance blocks default to nil, matching the package's default
+    /// of shipping no tools: a prompt that describes a file tool to a session
+    /// that has none teaches the model to call something that isn't there.
     public init(identity: String,
                 communication: String = ChatPersona.communicationBlock,
-                code: String? = ChatPersona.codeBlock,
+                code: String? = nil,
                 doingTasks: String? = ChatPersona.doingTasksBlock,
-                fileOperations: String? = ChatPersona.fileOperationsBlock,
-                runningCommands: String? = ChatPersona.runningCommandsBlock,
-                taskManagement: String? = ChatPersona.taskManagementBlock,
+                fileOperations: String? = nil,
+                runningCommands: String? = nil,
+                taskManagement: String? = nil,
                 additionalBlocks: [String] = []) {
         self.identity = identity
         self.communication = communication
@@ -56,22 +59,35 @@ public struct ChatPersona: Sendable, Equatable {
         self.additionalBlocks = additionalBlocks
     }
 
-    /// A general-purpose coding assistant with every behavioural block enabled.
-    public static let `default` = ChatPersona(identity: identityBlock)
+    /// The blank canvas: a neutral assistant with no tool or code guidance,
+    /// because a fresh session has no tools. Add the blocks that match the
+    /// providers you installed, or start from `.codingAgent`.
+    public static let `default` = ChatPersona(identity: assistantIdentityBlock)
 
-    /// Identity and communication only — no tool guidance, no code guidance.
-    /// The right starting point for a non-agentic or non-coding assistant.
-    public static let minimal = ChatPersona(identity: identityBlock,
-                                            code: nil,
-                                            doingTasks: nil,
-                                            fileOperations: nil,
-                                            runningCommands: nil,
-                                            taskManagement: nil)
+    /// Identity and communication only — nothing about how to approach work.
+    public static let minimal = ChatPersona(identity: assistantIdentityBlock,
+                                            doingTasks: nil)
+
+    /// Every behavioural block enabled, describing file, shell and todo tools.
+    /// Pair it with `FileToolProvider`, `ShellToolProvider` and `enableTodos`;
+    /// on its own it advertises tools the session doesn't have.
+    public static let codingAgent = ChatPersona(identity: identityBlock,
+                                                code: codeBlock,
+                                                fileOperations: fileOperationsBlock,
+                                                runningCommands: runningCommandsBlock,
+                                                taskManagement: taskManagementBlock)
 }
 
 // MARK: - Default blocks
 
 public extension ChatPersona {
+
+    /// The default identity. Says nothing about tools or a domain, because the
+    /// default session has neither.
+    static let assistantIdentityBlock = """
+    You are a helpful assistant. Answer the user's questions accurately and say so when \
+    you don't know something rather than guessing.
+    """
 
     static let identityBlock = """
     You are a coding assistant. You help developers work on their projects: writing and editing \
