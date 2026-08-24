@@ -51,6 +51,10 @@ public struct MarkdownCodeBlockView: View {
         return min(full, lineHeight * (CGFloat(MarkdownAttributedBuilder.collapsedCodeLines) + 0.5))
     }
 
+    /// Height the block occupies on screen. Also caps the text view itself, so a
+    /// collapsed block has nothing hidden to scroll to.
+    private var frameHeight: CGFloat { max(visibleHeight, lineHeight) + 16 }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -59,12 +63,13 @@ public struct MarkdownCodeBlockView: View {
                 code: code,
                 fontSize: PlatformFont.chatBodySize * 0.95,
                 textColor: PlatformColor.from(chat: palette.primaryText),
+                maxHeight: frameHeight,
                 onMeasure: { size, line in
                     contentSize = size
                     lineHeight = line
                 }
             )
-            .frame(height: max(visibleHeight, lineHeight) + 16)
+            .frame(height: frameHeight)
             .clipped()
             .overlay(alignment: .bottom) {
                 // Collapsing cuts the last visible line mid-glyph, which reads as a
@@ -168,6 +173,10 @@ private struct CodeScrollView {
     let code: String
     let fontSize: CGFloat
     let textColor: PlatformColor
+    /// Ceiling for the document height. Collapsed blocks pass a short value so the
+    /// hidden lines are never laid out into scrollable space — the block cuts off
+    /// instead of turning into a vertical scroller.
+    let maxHeight: CGFloat
     let onMeasure: (CGSize, CGFloat) -> Void
 
     /// TextKit 1 ownership runs storage -> layout manager -> container, and the
@@ -221,10 +230,33 @@ private struct CodeScrollView {
 
 #if canImport(AppKit)
 
+/// Clamping the document height is not enough on AppKit: the text view resizes itself
+/// during layout and the scroll view will happily scroll anything taller than the clip.
+/// These two pin the vertical axis outright — the wheel's vertical component goes to the
+/// transcript underneath, where the reader expects it.
+private final class HorizontalOnlyScrollView: NSScrollView {
+    override func scrollWheel(with event: NSEvent) {
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            super.scrollWheel(with: event)
+        } else {
+            nextResponder?.scrollWheel(with: event)
+        }
+    }
+}
+
+private final class TopPinnedClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        rect.origin.y = 0
+        return rect
+    }
+}
+
 extension CodeScrollView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        let scrollView = HorizontalOnlyScrollView()
+        scrollView.contentView = TopPinnedClipView()
         scrollView.hasHorizontalScroller = true
         scrollView.hasVerticalScroller = false
         // Vertical scrolling belongs to the transcript; the block sizes itself instead.
@@ -250,7 +282,7 @@ extension CodeScrollView: NSViewRepresentable {
         textView.isSelectable = true
         textView.isRichText = false
         textView.drawsBackground = false
-        textView.isVerticallyResizable = true
+        textView.isVerticallyResizable = false
         textView.isHorizontallyResizable = true
         textView.autoresizingMask = []
         textView.textContainerInset = NSSize(width: 12, height: 8)
@@ -271,9 +303,11 @@ extension CodeScrollView: NSViewRepresentable {
 
         let (size, line) = measure(layoutManager: layoutManager, container: container,
                                    paragraph: paragraph)
-        textView.minSize = size
+        let height = min(size.height + 16, maxHeight)
+        textView.minSize = CGSize(width: size.width, height: max(height - 16, 0))
+        textView.maxSize = CGSize(width: Self.unbounded.width, height: height)
         textView.frame = NSRect(origin: .zero,
-                                size: CGSize(width: size.width + 24, height: size.height + 16))
+                                size: CGSize(width: size.width + 24, height: height))
 
         let report = onMeasure
         Task { @MainActor in report(size, line) }
@@ -333,7 +367,8 @@ extension CodeScrollView: UIViewRepresentable {
         let (size, line) = measure(layoutManager: layoutManager, container: container,
                                    paragraph: paragraph)
         let frame = CGRect(origin: .zero,
-                           size: CGSize(width: size.width + 24, height: size.height + 16))
+                           size: CGSize(width: size.width + 24,
+                                        height: min(size.height + 16, maxHeight)))
         textView.frame = frame
         scrollView.contentSize = frame.size
 

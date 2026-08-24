@@ -2,10 +2,11 @@
 //  ThinkingIndicatorView.swift
 //  SwiftChatKit
 //
-//  What the transcript shows while the model is working and has produced
-//  nothing yet. Render it on `session.isThinking`, which is already false once
-//  text starts streaming — streaming text is its own indicator, and showing
-//  both reads as two things happening at once.
+//  What the transcript shows while the model is working. Render it on
+//  `session.isThinking` for the silent stretch before any text arrives; that
+//  flag goes false on the first token, so a second instance with its own label
+//  ("Responding…") can carry the rest of the run off `session.isStreaming`.
+//  Never show two at once — that reads as two things happening in parallel.
 //
 
 import SwiftUI

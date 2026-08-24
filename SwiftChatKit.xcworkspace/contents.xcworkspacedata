@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The package is deliberately *not* a member here. Both projects already
+     reference it by relative path, and declaring it twice makes Xcode resolve
+     the duplicate as "Missing package product". It still shows up in the
+     navigator, editable, under each project's package dependencies. -->
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "group:Examples/ChatDemoiOS/ChatDemoiOS.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:Examples/ChatDemoMac/ChatDemoMac.xcodeproj">
+   </FileRef>
+</Workspace>
