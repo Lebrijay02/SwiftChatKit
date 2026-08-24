@@ -7,3 +7,8 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 Examples/ChatDemo/.build/
+
+# Local agent tooling state: machine-specific paths, runtime pids and a
+# regenerable code index. Nothing here is meaningful on another checkout.
+.claude/
+.tokensave/
