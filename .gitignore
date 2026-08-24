@@ -2,11 +2,13 @@
 /.build
 /Packages
 xcuserdata/
+SwiftChatKit.xcworkspace/xcshareddata/swiftpm/configuration/
 DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 Examples/ChatDemo/.build/
+Examples/ChatDemo*/**/xcshareddata/swiftpm/configuration/
 
 # Local agent tooling state: machine-specific paths, runtime pids and a
 # regenerable code index. Nothing here is meaningful on another checkout.

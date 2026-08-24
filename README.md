@@ -15,33 +15,27 @@ what you wired up.
 
 ---
 
-## ⚠️ Status: under construction
+## What's in the box
 
-This package is being built incrementally. **Only the pieces listed under
-"Available today" exist and compile.** MCP, the SwiftUI renderer and slash
-commands are designed but **not yet implemented** — the API previews for them
-are marked `Not built yet` and will not compile.
+| Component | Module |
+|---|---|
+| Markdown parser | `ChatCore` |
+| `ChatValue`, tool declarations, schemas | `ChatCore` |
+| `ChatMessage`, `Attachment` | `ChatCore` |
+| `PermissionService`, `QuestionService` | `ChatCore` |
+| Todo checklist, plan mode | `ChatCore` |
+| Protocol seams (`ChatBackend`, `ToolProvider`, …) | `ChatCore` |
+| Agent Skills discovery | `ChatCore` |
+| Transcript persistence | `ChatCore` |
+| System-prompt assembly | `ChatCore` |
+| `ChatSession` agent loop | `ChatCore` |
+| Gemini backend | `ChatGemini` |
+| OpenAI-compatible backend | `ChatOpenAI` |
+| File + shell tool providers | `ChatTools` |
+| MCP client and manager | `ChatMCP` |
+| SwiftUI Markdown renderer, agent cards | `ChatUI` |
 
-| Component | Module | Status |
-|---|---|---|
-| Markdown parser | `ChatCore` | ✅ Available |
-| `ChatValue`, tool declarations, schemas | `ChatCore` | ✅ Available |
-| `ChatMessage`, `Attachment` | `ChatCore` | ✅ Available |
-| `PermissionService`, `QuestionService` | `ChatCore` | ✅ Available |
-| Todo checklist, plan mode | `ChatCore` | ✅ Available |
-| Protocol seams (`ChatBackend`, `ToolProvider`, …) | `ChatCore` | ✅ Available |
-| Agent Skills discovery | `ChatCore` | ✅ Available |
-| Transcript persistence | `ChatCore` | ✅ Available |
-| System-prompt assembly | `ChatCore` | ✅ Available |
-| Slash commands | `ChatCore` | ⬜ Not built yet |
-| `ChatSession` agent loop | `ChatCore` | ✅ Available |
-| Gemini backend | `ChatGemini` | ✅ Available |
-| OpenAI-compatible backend | `ChatOpenAI` | ✅ Available |
-| File + shell tool providers | `ChatTools` | ✅ Available |
-| MCP client and manager | `ChatMCP` | ✅ Available |
-| SwiftUI Markdown renderer, agent cards | `ChatUI` | ✅ Available |
-
-Every code sample in the "Available today" sections is compile-checked by
+Every code sample in this README is compile-checked by
 `Tests/ChatCoreTests/READMEExamples.swift`,
 `Tests/ChatGeminiTests/READMEExamples.swift`,
 `Tests/ChatOpenAITests/READMEExamples.swift`,
@@ -187,7 +181,7 @@ session.workingDirectory = url   // rescans project-local skills
 
 ---
 
-# Available today
+# Reference
 
 ## Markdown parsing
 
@@ -684,7 +678,7 @@ For OpenAI itself there is nothing to configure but a key:
 let backend = OpenAIBackend(apiKey: key, model: .gpt5)
 ```
 
-A `baseURL` typed by the user is likelier to arrive as a string, so there is a
+A `baseURL` typed by the user -.,m. cz|6vc,is likelier to arrive as a string, so there is a
 failable initializer that validates it instead of trapping:
 
 ```swift
@@ -1267,12 +1261,6 @@ than reporting a success that changed nothing.
 
 ---
 
-# Not built yet
-
-Still to come: slash commands (`/clear`, `/compact`, `/plan`, `/init`).
-
----
-
 ## The demo app
 
 `Examples/ChatDemo` is a standalone macOS app — a separate package that depends
@@ -1291,9 +1279,39 @@ renderer, the permission card and the auto-scroll. Drop a plist in and it uses
 `EchoBackend.swift` is worth reading on its own — it is the shortest possible
 answer to what a backend has to do.
 
-There is no iOS demo yet. `Examples/iOS-Example-Handoff.md` is the brief for
-building one: which products to depend on, which pieces compile away on iOS
-(shell tools, MCP stdio, the scroll-wheel reporter), and the acceptance list.
+### Seeing all of it in Xcode
+
+Opening `Package.swift` shows only what the manifest declares, so `Examples/` is
+invisible there. `SwiftChatKit.xcworkspace` holds the package and both example
+projects together:
+
+```sh
+open SwiftChatKit.xcworkspace
+```
+
+## The minimal demos
+
+`Examples/ChatDemoiOS` and `Examples/ChatDemoMac` are the other end of the range:
+the smallest host worth shipping, a backend and a transcript with no tools at
+all. They are Xcode projects depending on the package by path, and they share
+every file that isn't a view out of `Examples/ChatDemoShared`.
+
+```sh
+xcodebuild -project Examples/ChatDemoiOS/ChatDemoiOS.xcodeproj \
+  -scheme ChatDemoiOS -destination 'generic/platform=iOS Simulator' build
+
+xcodebuild -project Examples/ChatDemoMac/ChatDemoMac.xcodeproj \
+  -scheme ChatDemoMac -destination 'platform=macOS' build
+```
+
+Neither carries a credential and neither has a fallback backend: they open on a
+setup sheet, and no `ChatSession` exists until it names an OpenAI-compatible
+endpoint or finds a `GoogleService-Info.plist`. The key goes to the Keychain and
+the rest to `UserDefaults`.
+
+The pair is also the readable diff between the platforms — a `DragGesture`
+against the AppKit-only `ManualScrollReporter`, a send button against
+`onSubmit`, and toolbar placements. Each app's README records the rest.
 
 ---
 
@@ -1308,8 +1326,12 @@ swift test
 # macOS SDK, so a destination is required.
 xcodebuild -scheme SwiftChatKit -destination 'generic/platform=iOS' build
 
-# The demo, as an external consumer.
+# The demos, as external consumers.
 swift build --package-path Examples/ChatDemo
+xcodebuild -project Examples/ChatDemoiOS/ChatDemoiOS.xcodeproj \
+  -scheme ChatDemoiOS -destination 'generic/platform=iOS Simulator' build
+xcodebuild -project Examples/ChatDemoMac/ChatDemoMac.xcodeproj \
+  -scheme ChatDemoMac -destination 'platform=macOS' build
 ```
 
 Currently 328 tests across 52 suites. The Markdown suites are ported verbatim
@@ -1327,5 +1349,4 @@ the parser.
 - Skill frontmatter parsing handles single-line `key: value` pairs, quoted
   values and simple folded scalars — it is not a general YAML parser.
 - `ChatCore` is platform-agnostic, but the built-in shell and stdio-transport
-  tools will be macOS-only when they land — on iOS those targets compile to an
-  empty provider list.
+  tools are macOS-only — on iOS those targets compile to an empty provider list.
