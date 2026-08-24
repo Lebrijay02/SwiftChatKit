@@ -14,6 +14,7 @@ let package = Package(
         // Every capability is its own product, so nothing arrives unasked. Each
         // re-exports ChatCore, so one import is enough.
         .library(name: "SwiftChatKitGemini", targets: ["ChatGemini"]),
+        .library(name: "SwiftChatKitOpenAI", targets: ["ChatOpenAI"]),
         .library(name: "SwiftChatKitTools", targets: ["ChatTools"]),
         .library(name: "SwiftChatKitMCP", targets: ["ChatMCP"]),
         .library(name: "SwiftChatKitUI", targets: ["ChatUI"]),
@@ -38,6 +39,11 @@ let package = Package(
                 .product(name: "FirebaseAILogic", package: "firebase-ios-sdk"),
             ]),
         .testTarget(name: "ChatGeminiTests", dependencies: ["ChatGemini"]),
+
+        // Any server speaking OpenAI's `/chat/completions` format. Foundation
+        // only — no SDK, because the point is to reach servers no SDK covers.
+        .target(name: "ChatOpenAI", dependencies: ["ChatCore"]),
+        .testTarget(name: "ChatOpenAITests", dependencies: ["ChatOpenAI"]),
 
         // Built-in file and shell tools. Foundation only — the file tools go
         // through `FileSystemProviding`, so nothing here binds to a real disk.

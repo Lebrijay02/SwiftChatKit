@@ -36,6 +36,7 @@ are marked `Not built yet` and will not compile.
 | Slash commands | `ChatCore` | ⬜ Not built yet |
 | `ChatSession` agent loop | `ChatCore` | ✅ Available |
 | Gemini backend | `ChatGemini` | ✅ Available |
+| OpenAI-compatible backend | `ChatOpenAI` | ✅ Available |
 | File + shell tool providers | `ChatTools` | ✅ Available |
 | MCP client and manager | `ChatMCP` | ✅ Available |
 | SwiftUI Markdown renderer, agent cards | `ChatUI` | ✅ Available |
@@ -43,6 +44,7 @@ are marked `Not built yet` and will not compile.
 Every code sample in the "Available today" sections is compile-checked by
 `Tests/ChatCoreTests/READMEExamples.swift`,
 `Tests/ChatGeminiTests/READMEExamples.swift`,
+`Tests/ChatOpenAITests/READMEExamples.swift`,
 `Tests/ChatToolsTests/READMEExamples.swift`,
 `Tests/ChatMCPTests/READMEExamples.swift` and
 `Tests/ChatUITests/READMEExamples.swift`, which import the modules the way a
@@ -57,7 +59,7 @@ consumer does. If a sample stops compiling, the build breaks.
 | Swift toolchain | **6.2** or later (`swift-tools-version: 6.2`) |
 | Language mode | **Swift 6** — strict concurrency is on |
 | Platforms | macOS 14+, iOS 17+ |
-| Dependencies | none for `ChatCore`; `firebase-ios-sdk` 12.14+ for `ChatGemini` |
+| Dependencies | none for `ChatCore` or `ChatOpenAI`; `firebase-ios-sdk` 12.14+ for `ChatGemini` |
 
 Strict concurrency is not optional here. Types that cross the tool boundary
 (`ChatValue`, `ChatMessage`, `ToolDeclaration`, `ToolCall`, `ToolResult`,
@@ -65,7 +67,8 @@ Strict concurrency is not optional here. Types that cross the tool boundary
 protocols, so conformers are typically `actor`s or `@MainActor` classes.
 
 Dependencies are per-product. `SwiftChatKitGemini` pulls in `firebase-ios-sdk`
-(`FirebaseAILogic`); `SwiftChatKitMCP` pulls in `modelcontextprotocol/swift-sdk`,
+(`FirebaseAILogic`); `SwiftChatKitOpenAI` pulls in nothing at all — it is
+URLSession and Foundation; `SwiftChatKitMCP` pulls in `modelcontextprotocol/swift-sdk`,
 though only for its transports — the JSON-RPC handshake is driven by hand.
 Neither affects consumers of `SwiftChatKit` itself, which is `ChatCore` alone
 with no external dependencies.
@@ -89,6 +92,7 @@ targets: [
         // Then one product per capability you actually want. Skip any of them
         // and neither its code nor its dependencies enter your build.
         .product(name: "SwiftChatKitGemini", package: "SwiftChatKit"),
+        .product(name: "SwiftChatKitOpenAI", package: "SwiftChatKit"),
         .product(name: "SwiftChatKitTools", package: "SwiftChatKit"),
         .product(name: "SwiftChatKitMCP", package: "SwiftChatKit"),
         .product(name: "SwiftChatKitUI", package: "SwiftChatKit"),
@@ -100,6 +104,7 @@ targets: [
 |---|---|---|
 | `SwiftChatKit` | `ChatCore` | The engine. No dependencies, no tools, no backend |
 | `SwiftChatKitGemini` | `ChatGemini` | The Gemini backend (`firebase-ios-sdk`) |
+| `SwiftChatKitOpenAI` | `ChatOpenAI` | The OpenAI-compatible backend (no dependencies) |
 | `SwiftChatKitTools` | `ChatTools` | The file and shell tool providers |
 | `SwiftChatKitMCP` | `ChatMCP` | MCP servers as tools (`swift-sdk`) |
 | `SwiftChatKitUI` | `ChatUI` | The SwiftUI renderer and agent cards |
@@ -585,8 +590,8 @@ turn.
 
 ## The Gemini backend
 
-`ChatGemini` is the one shipped `ChatBackend`, over Firebase AI Logic's Vertex AI
-path. It is a thin translation layer: it owns every `FirebaseAILogic` type so
+`ChatGemini` is one of two shipped `ChatBackend`s, over Firebase AI Logic's
+Vertex AI path. It is a thin translation layer: it owns every `FirebaseAILogic` type so
 nothing above it has to.
 
 ```swift
@@ -640,6 +645,107 @@ await backend.setModel(.gemini2_5Pro)    // swaps models, carrying history acros
 
 These are the conversion tests, not prose: `Tests/ChatGeminiTests` covers each
 point above without a network or a Firebase project.
+
+---
+
+## The OpenAI-compatible backend
+
+`ChatOpenAI` speaks the `/chat/completions` wire format, which by now is less a
+vendor API than a lingua franca: OpenAI itself, but equally OpenRouter, Groq,
+Together, Fireworks, vLLM, Ollama, LM Studio, or a gateway of your own. You give
+it a base URL and an API key.
+
+It has **no dependencies** — URLSession and Foundation, SSE parsed by hand. That
+is deliberate rather than ascetic: the point of this backend is reaching servers
+no SDK was written for, so binding it to one would defeat it.
+
+```swift
+import ChatCore
+import ChatOpenAI
+
+let backend = OpenAIBackend(OpenAIBackendConfig(
+    baseURL: URL(string: "https://openrouter.ai/api/v1")!,
+    apiKey: key,
+    model: OpenAIModel("anthropic/claude-sonnet-4.5")))
+
+await backend.configure(
+    systemInstruction: SystemPromptBuilder.build(SystemPromptContext()),
+    tools: myProvider.declarations,
+    history: [])
+
+for try await chunk in backend.stream(.message("What changed in this file?")) {
+    // .text / .toolCall / .usage / .finish, exactly as the protocol describes
+}
+```
+
+For OpenAI itself there is nothing to configure but a key:
+
+```swift
+let backend = OpenAIBackend(apiKey: key, model: .gpt5)
+```
+
+A `baseURL` typed by the user is likelier to arrive as a string, so there is a
+failable initializer that validates it instead of trapping:
+
+```swift
+guard let config = OpenAIBackendConfig(baseURL: userTypedURL, apiKey: key,
+                                       model: OpenAIModel(userTypedModel))
+else { return .invalidEndpoint }
+```
+
+The URL is the root, up to but not including `chat/completions`. Trailing slashes
+are tolerated, and a URL that already ends in the endpoint is left alone rather
+than doubled — pasting the full URL is the likelier mistake to make.
+
+> Read the key from the Keychain or a server-side proxy. A key compiled into a
+> shipped app is a key that has already leaked.
+
+### Configuration
+
+| Field | Effect |
+|---|---|
+| `baseURL`, `apiKey`, `model` | The three things a compatible server needs. An empty key sends no `Authorization` header, which is what local servers want |
+| `temperature`, `maxCompletionTokens` | Nil omits the parameter entirely, so the server's own default applies |
+| `includeUsage` | Asks for the final usage-only chunk. Turn off for servers that reject `stream_options` rather than ignoring it |
+| `extraBody` | Merged into every request body, overriding anything above it. The escape hatch for provider-specific parameters — OpenRouter routing, vLLM sampling knobs, reasoning effort |
+| `extraHeaders` | Merged into every request's headers: `HTTP-Referer` and `X-Title` for OpenRouter, a tenant id for a gateway |
+| `timeout` | Cap on one streaming request, end to end. Default 300s |
+
+`OpenAIModel` is a `RawRepresentable` struct for the same reason `GeminiModel`
+is, only more so — the model list here is genuinely open:
+
+```swift
+OpenAIModel.known                        // the handful with curated names
+OpenAIModel("qwen3-coder:30b")           // whatever your server serves
+await backend.setModel(.gpt4oMini)       // swaps models, carrying history across
+```
+
+### What the translation layer guarantees
+
+- Tool arguments travel as a JSON **string**, not an object — sending the object
+  is the single most common way to get a 400 out of this API.
+- `optional:` is inverted into JSON Schema's `required`, and `.enumeration`
+  renders as a string with an `enum` constraint rather than a type of its own.
+- `content` stays present-but-null on a pure tool-call turn; several compatible
+  servers reject the message when the key is missing outright.
+- Parallel tool results become one `tool` message each, keyed by `tool_call_id`.
+  Folding them together loses the pairing and the server rejects the whole
+  conversation.
+- A single text part is sent as a plain string rather than a one-element content
+  array: the array form is valid in the spec and rejected by a few servers.
+- Attachments are inlined as `data:` URLs in an `image_url` content part.
+- Streamed tool calls are reassembled across frames by `index` — id, name and
+  argument fragments all arrive separately — and emitted **before** the `.finish`
+  chunk, since the agent loop stops reading at it.
+- Truncated tool arguments degrade to an empty argument map rather than throwing,
+  so the tool reports the real problem back to the model, which is recoverable.
+- A malformed SSE frame costs one delta, not the turn. Third-party servers do
+  emit them.
+- History is this backend's own state, since there is no chat object holding it,
+  and it is committed only once a turn succeeds — a retry replays that turn
+  rather than a conversation with a hole in it.
+
+`Tests/ChatOpenAITests` covers each point above with no network and no key.
 
 ---
 
@@ -1206,7 +1312,7 @@ xcodebuild -scheme SwiftChatKit -destination 'generic/platform=iOS' build
 swift build --package-path Examples/ChatDemo
 ```
 
-Currently 289 tests across 46 suites. The Markdown suites are ported verbatim
+Currently 328 tests across 52 suites. The Markdown suites are ported verbatim
 from the originating app — that equivalence is the primary regression signal for
 the parser.
 
