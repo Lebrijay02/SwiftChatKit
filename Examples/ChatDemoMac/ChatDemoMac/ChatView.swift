@@ -93,6 +93,10 @@ struct ChatView: View {
                 // the user took over. On iOS this is a `DragGesture` instead.
                 .background(ManualScrollReporter { autoScroll.userDidScroll() })
             }
+            // A fresh scroll view per conversation. Without this the old one keeps its
+            // content offset, so switching to a shorter chat leaves the reader parked
+            // past the end of it, staring at blank space.
+            .id(session.sessionID)
             .onChange(of: session.isThinking) { _, _ in
                 autoScroll.followEvent(proxy, anchor: Self.bottomAnchor)
             }
@@ -105,6 +109,14 @@ struct ChatView: View {
             .onChange(of: session.messages.count) { _, _ in
                 autoScroll.followEvent(proxy, anchor: Self.bottomAnchor)
             }
+            // A new chat or one pulled from history opens at the most recent message,
+            // never wherever the previous conversation was parked.
+            .onChange(of: session.sessionID) { _, _ in
+                snapToLatest(proxy)
+            }
+            .onAppear {
+                snapToLatest(proxy)
+            }
             .overlay(alignment: .bottom) {
                 if autoScroll.isAwayFromBottom {
                     JumpToBottomButton {
@@ -113,6 +125,20 @@ struct ChatView: View {
                     .padding(.bottom, 8)
                 }
             }
+        }
+    }
+
+    /// The restored rows are lazy, so the first scroll lands against a transcript that
+    /// hasn't measured yet. Repeating it over the next few passes is what actually ends
+    /// up on the last message; the controller keeps them all unanimated.
+    private func snapToLatest(_ proxy: ScrollViewProxy) {
+        autoScroll.snapToBottom(proxy, anchor: Self.bottomAnchor)
+        Task { @MainActor in
+            for _ in 0..<6 {
+                try? await Task.sleep(for: .milliseconds(16))
+                autoScroll.snapToBottom(proxy, anchor: Self.bottomAnchor)
+            }
+            autoScroll.transcriptDidSettle()
         }
     }
 

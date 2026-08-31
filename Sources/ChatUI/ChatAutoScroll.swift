@@ -45,6 +45,11 @@ public final class ChatAutoScrollController {
     /// Distance from the viewport bottom to the transcript's end, in points.
     private var distanceFromBottom: CGFloat = 0
 
+    /// True while a whole transcript is being swapped in. The rows land over a few
+    /// passes, and every one of them would otherwise start its own animated scroll —
+    /// a slide through messages the reader never asked to see.
+    private var isRestoring = false
+
     /// True when the reader has scrolled far enough up to warrant a "jump to bottom"
     /// affordance rather than silently dragging them along.
     public var isAwayFromBottom: Bool { !isFollowing && distanceFromBottom > Self.pinnedThreshold }
@@ -81,7 +86,27 @@ public final class ChatAutoScrollController {
     /// helps the reader see that something was appended.
     public func followEvent(_ proxy: ScrollViewProxy, anchor: String) {
         isFollowing = true
+        guard !isRestoring else {
+            proxy.scrollTo(anchor, anchor: .bottom)
+            return
+        }
         withAnimation(.easeOut(duration: 0.22)) { proxy.scrollTo(anchor, anchor: .bottom) }
+    }
+
+    /// Snaps to the end with no animation, for when the transcript is replaced wholesale —
+    /// a new chat, or one restored from history. Whatever the reader had scrolled to
+    /// belonged to the previous conversation, so following starts re-armed.
+    public func snapToBottom(_ proxy: ScrollViewProxy, anchor: String) {
+        isFollowing = true
+        distanceFromBottom = 0
+        isRestoring = true
+        proxy.scrollTo(anchor, anchor: .bottom)
+    }
+
+    /// Ends the restore window opened by ``snapToBottom(_:anchor:)``; call it once the
+    /// swapped-in rows have laid out.
+    public func transcriptDidSettle() {
+        isRestoring = false
     }
 
     /// Explicit jump, from the button offered when following is disengaged.
