@@ -9,7 +9,11 @@
 
 import SwiftUI
 
-public struct ChatPalette: Sendable {
+/// `Hashable` so the renderer can tell one theme from another cheaply. It cannot do that
+/// from the platform colors a palette is converted into: a SwiftUI `Color` that follows
+/// the system appearance becomes a dynamic catalog color, and every conversion produces a
+/// fresh one that describes itself with a new UUID.
+public struct ChatPalette: Sendable, Hashable {
 
     public var accent: Color
     public var background: Color

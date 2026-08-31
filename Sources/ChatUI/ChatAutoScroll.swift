@@ -63,7 +63,14 @@ public final class ChatAutoScrollController {
     /// True while a whole transcript is being swapped in. The rows land over a few
     /// passes, and every one of them would otherwise start its own animated scroll —
     /// a slide through messages the reader never asked to see.
-    private var isRestoring = false
+    private(set) var isRestoring = false
+
+    /// Where to keep scrolling while the swapped-in transcript settles.
+    private var restoreTarget: (proxy: ScrollViewProxy, anchor: String)?
+
+    /// Ends a restore that never reports itself settled, so a transcript that cannot
+    /// reach its own end doesn't leave every later scroll unanimated.
+    private var restoreTimeout: Task<Void, Never>?
 
     /// True when the reader has scrolled far enough up to warrant a "jump to bottom"
     /// affordance rather than silently dragging them along.
@@ -99,6 +106,40 @@ public final class ChatAutoScrollController {
         if distanceFromBottom <= Self.pinnedThreshold {
             isFollowing = true
         }
+        driveRestore()
+    }
+
+    /// A restored transcript's rows are lazy: the first scroll aims at a stack that has
+    /// not measured itself yet, and lands short. Every subsequent measurement is a report
+    /// through here, so the restore rides the layout passes as they actually happen
+    /// rather than guessing at how many there will be and how far apart.
+    private func driveRestore() {
+        guard isRestoring else { return }
+        guard distanceFromBottom > Self.pinnedThreshold else {
+            endRestore()
+            return
+        }
+        if let target = restoreTarget {
+            target.proxy.scrollTo(target.anchor, anchor: .bottom)
+        }
+    }
+
+    /// Enters the restore state. Split out from ``snapToBottom(_:anchor:)`` so it can be
+    /// entered without a scroll view — which is also the only way to reach it from a test,
+    /// since `ScrollViewProxy` cannot be constructed.
+    func beginRestore() {
+        isFollowing = true
+        distanceFromBottom = 0
+        isRestoring = true
+        anchorTopY = nil
+        lastStreamFollow = nil
+    }
+
+    private func endRestore() {
+        isRestoring = false
+        restoreTarget = nil
+        restoreTimeout?.cancel()
+        restoreTimeout = nil
     }
 
     /// Called when the reader drags or scrolls by hand.
@@ -144,20 +185,27 @@ public final class ChatAutoScrollController {
     /// Snaps to the end with no animation, for when the transcript is replaced wholesale —
     /// a new chat, or one restored from history. Whatever the reader had scrolled to
     /// belonged to the previous conversation, so following starts re-armed.
+    ///
+    /// Keeps scrolling until the transcript reports that it has arrived; callers do not
+    /// have to chase the lazy rows themselves.
     public func snapToBottom(_ proxy: ScrollViewProxy, anchor: String) {
-        isFollowing = true
-        distanceFromBottom = 0
-        isRestoring = true
         // The incoming transcript's geometry has nothing to do with the outgoing one's.
-        anchorTopY = nil
-        lastStreamFollow = nil
+        beginRestore()
+        restoreTarget = (proxy, anchor)
         proxy.scrollTo(anchor, anchor: .bottom)
+
+        restoreTimeout?.cancel()
+        restoreTimeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self?.endRestore()
+        }
     }
 
-    /// Ends the restore window opened by ``snapToBottom(_:anchor:)``; call it once the
-    /// swapped-in rows have laid out.
+    /// Ends the restore window opened by ``snapToBottom(_:anchor:)`` early. Rarely needed:
+    /// the restore ends itself as soon as the transcript reports it has reached the end.
     public func transcriptDidSettle() {
-        isRestoring = false
+        endRestore()
     }
 
     /// Explicit jump, from the button offered when following is disengaged.

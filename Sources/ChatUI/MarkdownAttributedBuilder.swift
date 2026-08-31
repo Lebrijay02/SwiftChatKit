@@ -57,10 +57,26 @@ public enum MarkdownAttributedBuilder {
 
     public static func build(_ blocks: [MarkdownBlock], style: MarkdownStyle) -> MarkdownRenderResult {
         let result = NSMutableAttributedString()
+        let regions = append(blocks, to: result, style: style)
+        return MarkdownRenderResult(attributed: result, codeRegions: regions)
+    }
+
+    /// Renders `blocks` onto the end of `target`, returning any code regions found.
+    ///
+    /// Separate from ``build(_:style:)`` so a streaming message can extend text it has
+    /// already rendered instead of rebuilding it. Blocks carry no state across each
+    /// other — only the separator between them — so appending a suffix produces exactly
+    /// what building the whole sequence at once would have.
+    @discardableResult
+    public static func append(_ blocks: [MarkdownBlock],
+                              to result: NSMutableAttributedString,
+                              style: MarkdownStyle) -> [MarkdownCodeRegion] {
         var regions: [MarkdownCodeRegion] = []
 
-        for (index, block) in blocks.enumerated() {
-            if index > 0 { appendSeparator(to: result) }
+        for block in blocks {
+            // Every block leaves the string non-empty, so this is the same test as
+            // "not the first block" was when this only ever started from nothing.
+            if result.length > 0 { appendSeparator(to: result) }
             switch block {
             case .heading(let level, let content, _):
                 append(heading(level: level, content: content, style: style), to: result)
@@ -101,7 +117,7 @@ public enum MarkdownAttributedBuilder {
             }
         }
 
-        return MarkdownRenderResult(attributed: result, codeRegions: regions)
+        return regions
     }
 
     private static func append(_ piece: NSAttributedString, to target: NSMutableAttributedString) {

@@ -63,6 +63,13 @@ public final class MarkdownRenderCoordinator {
     private var renderedText: String?
     private var renderedStyleKey: String?
     private var currentStyle: MarkdownStyle?
+
+    /// The last parse and the last split, each kept so the next delta can pick up where
+    /// they left off rather than re-reading and re-rendering the whole message. Both
+    /// verify for themselves that they still apply, so a wholly different message or a
+    /// theme change simply falls back to doing the work.
+    private var document: MarkdownDocument?
+    private var segmentSet: MarkdownSegmentSet?
     /// Frames observed with nothing pending; the timer stops once the stream goes quiet.
     private var idleFrames = 0
 
@@ -103,7 +110,11 @@ public final class MarkdownRenderCoordinator {
     private func renderNow(text: String, style: MarkdownStyle) {
         renderedText = text
         currentStyle = style
-        segments = MarkdownSegment.split(MarkdownBlockParser.parse(text), style: style)
+        let parsed = MarkdownBlockParser.parse(text, reusing: document)
+        let split = MarkdownSegment.split(parsed, style: style, reusing: segmentSet)
+        document = parsed
+        segmentSet = split
+        segments = split.segments
     }
 
     public func stop() {
@@ -113,9 +124,8 @@ public final class MarkdownRenderCoordinator {
         idleFrames = 0
     }
 
-    /// Cheap identity for a style, used to detect theme/appearance changes.
     static func key(for style: MarkdownStyle) -> String {
-        "\(style.bodyFontSize)-\(style.textColor)-\(style.codeBackground)-\(style.accentColor)"
+        MarkdownStyle.key(for: style)
     }
 }
 

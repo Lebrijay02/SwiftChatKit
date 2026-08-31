@@ -9,16 +9,113 @@
 
 import Foundation
 
+/// A parsed message, plus what it takes to parse the next version of it without
+/// starting over.
+///
+/// Streaming appends: each delta re-renders the whole message, and at 60fps over a long
+/// answer that re-parses text that cannot have changed. Holding on to where each block
+/// began lets the next parse resume near the end instead.
+public struct MarkdownDocument: Sendable {
+
+    public let blocks: [MarkdownBlock]
+
+    /// The line each block started on, parallel to ``blocks``.
+    let blockStartLines: [Int]
+
+    /// The source text preceding ``resumeLine``, kept verbatim so the next parse can
+    /// confirm it really is dealing with an append and not an edit.
+    let retainedPrefix: String
+
+    /// The line the next parse may resume from, given the prefix still matches.
+    let resumeLine: Int
+
+    /// How many leading blocks the *next* parse may keep.
+    public let stableBlockCount: Int
+
+    /// How many leading blocks this parse actually carried over from the document it was
+    /// given. Zero whenever the text was not an append and everything had to be re-read.
+    ///
+    /// The distinction matters to anything reusing work of its own: `stableBlockCount` is
+    /// a promise about the future, while this is a statement about what just happened.
+    /// Trusting the former after a full re-parse would keep rendered text for blocks that
+    /// have since become something else entirely.
+    public let reusedBlockCount: Int
+
+    public static let empty = MarkdownDocument(blocks: [], blockStartLines: [],
+                                               retainedPrefix: "", resumeLine: 0,
+                                               stableBlockCount: 0, reusedBlockCount: 0)
+}
+
 public enum MarkdownBlockParser {
 
     /// Splits Markdown source into block-level nodes. Tolerant of unterminated
     /// constructs so a half-streamed message still renders.
     public static func parse(_ text: String) -> [MarkdownBlock] {
-        var blocks: [MarkdownBlock] = []
+        parse(text, reusing: nil).blocks
+    }
+
+    /// Parses `text`, reusing whatever of `previous` still applies.
+    ///
+    /// Sound because the parser is a forward scanner: a block's extent is decided by the
+    /// lines from its own start onward, and appending changes only the final line and
+    /// what follows it. Blocks that ended before the resume point therefore cannot be
+    /// affected. The resume point is set one block further back than that argument
+    /// strictly requires, which covers the one- and two-line lookaheads a block does into
+    /// the start of the next one (a table's delimiter row, a definition's `: ` line, a
+    /// paragraph interrupted by a fence).
+    public static func parse(_ text: String, reusing previous: MarkdownDocument?) -> MarkdownDocument {
         let lines = text.components(separatedBy: "\n")
-        var i = 0
+
+        if let previous, previous.stableBlockCount > 0,
+           previous.resumeLine <= lines.count,
+           // An append extends the prefix untouched; an edit or a wholly new message
+           // fails here and falls through to a full parse.
+           text.hasPrefix(previous.retainedPrefix) {
+            let tail = scan(lines, from: previous.resumeLine)
+            return assemble(lines: lines,
+                            blocks: Array(previous.blocks[..<previous.stableBlockCount]) + tail.blocks,
+                            starts: Array(previous.blockStartLines[..<previous.stableBlockCount]) + tail.starts,
+                            reused: previous.stableBlockCount)
+        }
+
+        let all = scan(lines, from: 0)
+        return assemble(lines: lines, blocks: all.blocks, starts: all.starts, reused: 0)
+    }
+
+    /// Chooses the next resume point and captures the prefix that has to hold for it.
+    private static func assemble(lines: [String],
+                                 blocks: [MarkdownBlock],
+                                 starts: [Int],
+                                 reused: Int) -> MarkdownDocument {
+        // Two blocks back from the end: the last block is still growing, and the one
+        // before it may have read the last block's opening lines while deciding where
+        // it ended.
+        let stable = max(0, blocks.count - 2)
+        let resumeLine = stable > 0 ? starts[stable] : 0
+        // `components(separatedBy:)` is exactly reversible, so this is the original text
+        // up to that line — the string an appended version must still start with.
+        let prefix = resumeLine > 0 ? lines[..<resumeLine].joined(separator: "\n") + "\n" : ""
+        return MarkdownDocument(blocks: blocks,
+                                blockStartLines: starts,
+                                retainedPrefix: prefix,
+                                resumeLine: resumeLine,
+                                stableBlockCount: stable,
+                                reusedBlockCount: min(reused, stable))
+    }
+
+    private static func scan(_ lines: [String], from start: Int) -> (blocks: [MarkdownBlock], starts: [Int]) {
+        var blocks: [MarkdownBlock] = []
+        var starts: [Int] = []
+        var i = start
+
+        /// Records where a block began, in step with appending it.
+        func append(_ block: MarkdownBlock, at line: Int) {
+            blocks.append(block)
+            starts.append(line)
+        }
 
         while i < lines.count {
+            let blockStart = i
             let line = lines[i]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
@@ -26,7 +123,7 @@ public enum MarkdownBlockParser {
 
             if let fence = fenceInfo(trimmed) {
                 let (block, next) = parseFencedCode(lines, from: i, fence: fence)
-                blocks.append(block)
+                append(block, at: blockStart)
                 i = next
                 continue
             }
@@ -34,61 +131,61 @@ public enum MarkdownBlockParser {
             // Display math: a `$$` line on its own, or `$$...$$` all on one line.
             if trimmed.hasPrefix("$$") {
                 let (block, next) = parseDisplayMath(lines, from: i)
-                blocks.append(block)
+                append(block, at: blockStart)
                 i = next
                 continue
             }
 
             if isThematicBreak(trimmed) {
-                blocks.append(.thematicBreak)
+                append(.thematicBreak, at: blockStart)
                 i += 1
                 continue
             }
 
             if let heading = parseATXHeading(trimmed) {
-                blocks.append(heading)
+                append(heading, at: blockStart)
                 i += 1
                 continue
             }
 
             if isTableRow(trimmed) {
                 let (block, next) = parseTable(lines, from: i)
-                if let block { blocks.append(block); i = next; continue }
+                if let block { append(block, at: blockStart); i = next; continue }
             }
 
             if trimmed.hasPrefix(">") {
                 let (block, next) = parseBlockQuote(lines, from: i)
-                blocks.append(block)
+                append(block, at: blockStart)
                 i = next
                 continue
             }
 
             if let footnote = parseFootnoteDefinition(trimmed) {
-                blocks.append(footnote)
+                append(footnote, at: blockStart)
                 i += 1
                 continue
             }
 
             if listMarker(line) != nil {
                 let (block, next) = parseList(lines, from: i)
-                blocks.append(block)
+                append(block, at: blockStart)
                 i = next
                 continue
             }
 
             if isDefinitionTerm(lines, at: i) {
                 let (block, next) = parseDefinitionList(lines, from: i)
-                blocks.append(block)
+                append(block, at: blockStart)
                 i = next
                 continue
             }
 
             let (block, next) = parseParagraph(lines, from: i)
-            if let block { blocks.append(block) }
+            if let block { append(block, at: blockStart) }
             i = next
         }
 
-        return blocks
+        return (blocks, starts)
     }
 
     // MARK: - Fenced code

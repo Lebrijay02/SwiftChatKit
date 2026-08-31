@@ -120,10 +120,10 @@ struct ChatView: View {
             // A new chat or one pulled from history opens at the most recent message,
             // never wherever the previous conversation was parked.
             .onChange(of: session.sessionID) { _, _ in
-                snapToLatest(proxy)
+                autoScroll.snapToBottom(proxy, anchor: Self.bottomAnchor)
             }
             .onAppear {
-                snapToLatest(proxy)
+                autoScroll.snapToBottom(proxy, anchor: Self.bottomAnchor)
             }
             .overlay(alignment: .bottom) {
                 if autoScroll.isAwayFromBottom {
@@ -136,19 +136,6 @@ struct ChatView: View {
         }
     }
 
-    /// The restored rows are lazy, so the first scroll lands against a transcript that
-    /// hasn't measured yet. Repeating it over the next few passes is what actually ends
-    /// up on the last message; the controller keeps them all unanimated.
-    private func snapToLatest(_ proxy: ScrollViewProxy) {
-        autoScroll.snapToBottom(proxy, anchor: Self.bottomAnchor)
-        Task { @MainActor in
-            for _ in 0..<6 {
-                try? await Task.sleep(for: .milliseconds(16))
-                autoScroll.snapToBottom(proxy, anchor: Self.bottomAnchor)
-            }
-            autoScroll.transcriptDidSettle()
-        }
-    }
 
     @ViewBuilder
     private func row(_ message: ChatMessage) -> some View {

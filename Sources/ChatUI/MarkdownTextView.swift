@@ -167,6 +167,14 @@ public final class MarkdownNSTextView: NSTextView {
 
     var style: MarkdownStyle?
 
+    /// The text currently in the storage, by identity. A message whose segments were
+    /// reused hands back the very same string, and comparing pointers settles that in
+    /// no time where comparing contents is proportional to the message.
+    var applied: NSAttributedString?
+
+    /// Last measurement, valid while both the text and the proposed width hold.
+    var measurement: MarkdownMeasurement?
+
     /// TextKit 1 ownership runs storage -> layout manager -> container, and the
     /// back-references are weak. The view has to keep the top of that chain alive.
     var chatTextStorage: NSTextStorage?
@@ -219,9 +227,11 @@ public struct MarkdownTextViewRepresentable: NSViewRepresentable {
 
     public func updateNSView(_ textView: MarkdownNSTextView, context: Context) {
         textView.style = style
+        guard textView.applied !== attributed else { return }
         if textView.textStorage?.matchesChat(attributed) != true {
             textView.textStorage?.setAttributedString(attributed)
         }
+        textView.applied = attributed
         textView.needsDisplay = true
     }
 
@@ -229,7 +239,7 @@ public struct MarkdownTextViewRepresentable: NSViewRepresentable {
                              nsView: MarkdownNSTextView,
                              context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
-        return CGSize(width: width, height: measuredHeight(of: attributed, width: width))
+        return CGSize(width: width, height: nsView.height(of: attributed, width: width))
     }
 }
 
@@ -242,6 +252,14 @@ public struct MarkdownTextViewRepresentable: NSViewRepresentable {
 public final class MarkdownUITextView: UITextView {
 
     var style: MarkdownStyle?
+
+    /// The text currently in the storage, by identity. A message whose segments were
+    /// reused hands back the very same string, and comparing pointers settles that in
+    /// no time where comparing contents is proportional to the message.
+    var applied: NSAttributedString?
+
+    /// Last measurement, valid while both the text and the proposed width hold.
+    var measurement: MarkdownMeasurement?
 
     /// TextKit 1 ownership runs storage -> layout manager -> container, and the
     /// back-references are weak. The view has to keep the top of that chain alive.
@@ -291,9 +309,11 @@ public struct MarkdownTextViewRepresentable: UIViewRepresentable {
 
     public func updateUIView(_ textView: MarkdownUITextView, context: Context) {
         textView.style = style
+        guard textView.applied !== attributed else { return }
         if !textView.textStorage.matchesChat(attributed) {
             textView.textStorage.setAttributedString(attributed)
         }
+        textView.applied = attributed
         textView.setNeedsDisplay()
     }
 
@@ -301,7 +321,7 @@ public struct MarkdownTextViewRepresentable: UIViewRepresentable {
                              uiView: MarkdownUITextView,
                              context: Context) -> CGSize? {
         guard let width = proposal.width, width.isFinite, width > 0 else { return nil }
-        return CGSize(width: width, height: measuredHeight(of: attributed, width: width))
+        return CGSize(width: width, height: uiView.height(of: attributed, width: width))
     }
 }
 
@@ -320,6 +340,43 @@ func makeTextKitStack() -> (NSTextStorage, NSLayoutManager, NSTextContainer) {
     layoutManager.addTextContainer(container)
     storage.addLayoutManager(layoutManager)
     return (storage, layoutManager, container)
+}
+
+/// One remembered result of ``measuredHeight(of:width:)``.
+struct MarkdownMeasurement {
+    let attributed: NSAttributedString
+    let width: CGFloat
+    let height: CGFloat
+}
+
+#if canImport(AppKit)
+extension MarkdownNSTextView: MarkdownMeasuring {}
+#elseif canImport(UIKit)
+extension MarkdownUITextView: MarkdownMeasuring {}
+#endif
+
+/// Caches a message's measured height against the view that will display it.
+///
+/// SwiftUI re-proposes a size on every layout pass, and laying out a whole message to
+/// answer costs the same whether or not anything changed. During a stream that is once
+/// per frame for every message on screen — the settled ones included, which is most of a
+/// long transcript.
+@MainActor
+protocol MarkdownMeasuring: AnyObject {
+    var measurement: MarkdownMeasurement? { get set }
+}
+
+extension MarkdownMeasuring {
+    func height(of attributed: NSAttributedString, width: CGFloat) -> CGFloat {
+        // Identity, not equality: the segment builder hands back the same string for text
+        // it reused, and an equality check here would be the cost this is avoiding.
+        if let measurement, measurement.attributed === attributed, measurement.width == width {
+            return measurement.height
+        }
+        let height = measuredHeight(of: attributed, width: width)
+        measurement = MarkdownMeasurement(attributed: attributed, width: width, height: height)
+        return height
+    }
 }
 
 /// Measures with a disposable TextKit stack rather than the live view's own container.

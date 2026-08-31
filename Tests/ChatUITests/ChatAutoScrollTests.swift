@@ -105,6 +105,20 @@ struct ChatAutoScrollTests {
         #expect(controller.isFollowing)
     }
 
+    @Test("A restored transcript stays in restore until it reports it arrived")
+    func restoreEndsOnArrival() {
+        let controller = ChatAutoScrollController()
+        controller.beginRestore()
+        #expect(controller.isRestoring)
+
+        // Lazy rows measuring: the end of the transcript is still way below the fold.
+        controller.reportDistanceFromBottom(2_400)
+        #expect(controller.isRestoring, "still catching up")
+
+        controller.reportDistanceFromBottom(0)
+        #expect(!controller.isRestoring, "arrived, so the restore is over")
+    }
+
     @Test("A scroll view reporting its own geometry supersedes the anchor's")
     func scrollGeometryWins() {
         let controller = ChatAutoScrollController()
