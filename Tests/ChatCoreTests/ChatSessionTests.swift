@@ -714,8 +714,8 @@ struct SessionLifecycleTests {
         #expect(session.replayableTurns().map(\.role) == [.user, .model])
     }
 
-    @Test("A trailing unanswered call is dropped, since it would invalidate the next send")
-    func trailingUnansweredCallDropped() {
+    @Test("An unanswered call is answered on replay, since a bare call invalidates the next send")
+    func unansweredCallIsAnswered() {
         let recorder = RunRecorder()
         let session = makeSession(backend: MockBackend(), recorder: recorder)
         session.load(StoredSession(title: "old", messages: [
@@ -724,7 +724,53 @@ struct SessionLifecycleTests {
                                                    arguments: ["path": "a"]))),
         ]))
 
-        #expect(session.replayableTurns().map(\.role) == [.user])
+        let turns = session.replayableTurns()
+        #expect(turns.map(\.role) == [.user, .model, .user])
+        #expect(turns.last?.parts == [.toolResult(ToolResult(
+            callID: "x",
+            name: "readFile",
+            payload: ["error": .string(AgentRefusal.cancelled)]))])
+    }
+
+    /// The backend commits a turn the moment it finishes streaming, so a run
+    /// stopped after the calls arrived leaves it holding calls that were never
+    /// answered. Only a rebuild from the transcript clears that.
+    @Test("A stopped run makes the next run rebuild the backend's history")
+    func stoppedRunRebuildsBackendHistory() async {
+        let recorder = RunRecorder()
+        let backend = MockBackend(script: [
+            [.toolCall(ToolCall(id: "r", name: "readFile", arguments: ["path": "a"])),
+             .finish(.stop)],
+            [.text("Read it."), .finish(.stop)],
+        ], turnDelay: .milliseconds(200))
+        let session = makeSession(backend: backend,
+                                  providers: [MockProvider.readFile()],
+                                  recorder: recorder)
+
+        session.send("read it")
+        #expect(await Wait.until { session.isStreaming })
+        session.stop()
+        #expect(await Wait.runs(recorder))
+        #expect(recorder.outcomes == [.stopped])
+
+        let rebuilds = await backend.configureCount
+        session.send("again")
+        #expect(await Wait.runs(recorder, count: 2))
+        #expect(await backend.configureCount == rebuilds + 1)
+
+        // Whatever the stopped run left behind, the replayed history is valid:
+        // no call goes unanswered.
+        let replayed = await backend.configuredHistory
+        for (index, turn) in replayed.enumerated() where turn.role == .model {
+            let calls = turn.parts.compactMap { part -> ToolCall? in
+                if case .toolCall(let call) = part { return call } else { return nil }
+            }
+            guard !calls.isEmpty else { continue }
+            let answers = (replayed[index + 1].parts).compactMap { part -> String? in
+                if case .toolResult(let result) = part { return result.callID } else { return nil }
+            }
+            #expect(Set(calls.map(\.id)) == Set(answers))
+        }
     }
 
     @Test("A saved session round-trips back into a live one")

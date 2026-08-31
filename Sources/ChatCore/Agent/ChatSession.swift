@@ -363,6 +363,14 @@ public final class ChatSession {
         isStreaming = false
         modelIsWorking = false
         finalizeStreamingMessages()
+
+        // A run that stopped or failed part-way can leave the backend holding a
+        // model turn whose tool calls were never answered — it committed the
+        // turn, then the loop unwound before the results were sent. Every send
+        // after that is rejected, so the next run rebuilds history from the
+        // transcript, where `replayableTurns` answers each call.
+        if outcome != .completed { configuredFingerprint = nil }
+
         save()
 
         await recordTelemetry(userText: userText,
@@ -663,16 +671,23 @@ public final class ChatSession {
     /// parallel calls are a single model turn, their results a single user turn.
     func replayableTurns() -> [ChatTurn] {
         var turns: [ChatTurn] = []
-        var pendingCalls: [TurnPart] = []
-        var pendingResults: [TurnPart] = []
+        var pendingCalls: [ToolCall] = []
+        var pendingResults: [ToolResult] = []
 
         func flush() {
             if !pendingCalls.isEmpty {
-                turns.append(ChatTurn(role: .model, parts: pendingCalls))
+                // Every call has to be answered. A run stopped mid-tool leaves
+                // calls with no result, and replaying an unanswered call makes
+                // that send — and every send after it — invalid.
+                let answered = Set(pendingResults.map(\.callID))
+                for call in pendingCalls where !answered.contains(call.id) {
+                    pendingResults.append(.failure(call, AgentRefusal.cancelled))
+                }
+                turns.append(ChatTurn(role: .model, parts: pendingCalls.map(TurnPart.toolCall)))
                 pendingCalls = []
             }
             if !pendingResults.isEmpty {
-                turns.append(ChatTurn(role: .user, parts: pendingResults))
+                turns.append(ChatTurn(role: .user, parts: pendingResults.map(TurnPart.toolResult)))
                 pendingResults = []
             }
         }
@@ -689,27 +704,21 @@ public final class ChatSession {
                 // A call after results belongs to the next turn.
                 if !pendingResults.isEmpty { flush() }
                 guard let arguments = message.rawArguments else { continue }
-                pendingCalls.append(.toolCall(ToolCall(id: message.callID ?? UUID().uuidString,
-                                                       name: name,
-                                                       arguments: arguments)))
+                pendingCalls.append(ToolCall(id: message.callID ?? UUID().uuidString,
+                                             name: name,
+                                             arguments: arguments))
             case .toolResult(let name):
-                if !pendingCalls.isEmpty {
-                    turns.append(ChatTurn(role: .model, parts: pendingCalls))
-                    pendingCalls = []
-                }
-                guard let payload = message.rawResult else { continue }
-                pendingResults.append(.toolResult(ToolResult(callID: message.callID ?? "",
-                                                             name: name,
-                                                             payload: payload)))
+                guard let payload = message.rawResult,
+                      let callID = message.callID,
+                      // A result whose call was dropped above is as invalid as
+                      // an unanswered call, just from the other side.
+                      pendingCalls.contains(where: { $0.id == callID })
+                else { continue }
+                pendingResults.append(ToolResult(callID: callID, name: name, payload: payload))
             }
         }
         flush()
 
-        // A trailing model turn of unanswered calls makes the next send invalid.
-        if let last = turns.last, last.role == .model,
-           last.parts.contains(where: { if case .toolCall = $0 { return true } else { return false } }) {
-            turns.removeLast()
-        }
         return turns
     }
 
