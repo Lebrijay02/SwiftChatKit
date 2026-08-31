@@ -23,8 +23,8 @@ you run on a device. The simulator needs nothing.
 
 There are no credentials in this repository and **no canned fallback backend** —
 a demo echoing a fixed string proves nothing about the package. So the app opens
-on a setup sheet and builds no `ChatSession` until it is filled in. The gear in
-the toolbar reopens it later.
+on a setup sheet and builds no `ChatSession` until it is filled in. The toolbar
+menu reopens it later.
 
 | Backend | What it needs |
 |---|---|
@@ -47,7 +47,10 @@ into a shipped app is a key that has already leaked.
 | `DemoConfigurationStore.swift` | `UserDefaults` for the settings, Keychain for the key. |
 | `DemoBackend.swift` | Configuration in, `any ChatBackend` out. Both branches are one initializer — that is the whole backend seam. |
 | `ConfigurationView.swift` | The setup sheet. |
-| `RootView.swift` | The gate: no session exists until a backend does. |
+| `RootView.swift` | The gate: no session exists until a backend does. Also builds the `MCPManager`, seeds it from `DefaultMCPServers`, and opens the `ChatHistoryStore` both apps save into. |
+| `DefaultMCPServers.swift` | Public test/mock MCP servers, seeded on first launch so there's something real to connect to without a key. |
+| `HistoryView.swift` | Lists saved sessions from `ChatHistoryStore` and loads one back into the live `ChatSession`. |
+| `SettingsView.swift` | The configured MCP servers (both platforms) and installed Agent Skills (macOS only — see below). |
 
 Only `ChatDemoiOSApp.swift` and `ChatView.swift` are per-platform.
 
@@ -58,11 +61,15 @@ Only `ChatDemoiOSApp.swift` and `ChatView.swift` are per-platform.
 | `DragGesture` instead of `ManualScrollReporter` | The reporter watches scroll-wheel events and is AppKit-only. A drag is the iOS equivalent signal into `autoScroll.userDidScroll()`. |
 | Send button, no `onSubmit` | Return inserts a newline on a software keyboard. |
 | `.scrollDismissesKeyboard(.interactively)` | No equivalent problem on a Mac. |
+| No `FileToolProvider` / `ShellToolProvider` | `Sources/ChatTools`'s shell runner is `os(macOS)` only, so this platform's tool list is MCP alone. `persona` stays `.default`, and `enableTodos` / `enableQuestions` stay off — there's no multi-step tool work here to plan or checklist. |
+| `skills: .disabled` | `SkillsConfiguration.claudeCompatible` reads `~/.claude/skills`; iOS has no home directory a user manages, so the settings screen's Skills section is `#if os(macOS)` only. |
 
-Neither version wires up tools: `Sources/ChatTools`'s shell runner is
-`os(macOS)` only and MCP's stdio transport launches a process, so keeping the
-two apps identical means keeping both out. Capabilities are opt-in, so
-`persona: .default` and an empty provider list is the entire configuration.
+MCP is the one capability this app gets that the "minimal" framing above
+doesn't quite cover: its `.http` transport works cross-platform (unlike stdio,
+which launches a process), so both apps offer the same seeded servers through
+the same settings sheet, and both persist conversations through the same
+`ChatHistoryStore`. What's still opt-in and skipped here is exactly what
+needs a real filesystem: files, shell, and skills.
 
 GFM tables also render plainer on iOS: the macOS path uses `NSTextTable` and iOS
 falls back to tab stops at a fixed column width. Not a bug, and not something

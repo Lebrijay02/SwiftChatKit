@@ -4,7 +4,9 @@
 //
 //  The whole UI: read `session.messages`, render them, call `send` and `stop`.
 //  Identical to the iOS example apart from the two places where AppKit and
-//  UIKit genuinely differ, both marked below.
+//  UIKit genuinely differ, both marked below. The agent cards are the engine
+//  asking the user something mid-turn — file, shell, and MCP tools can all
+//  prompt for approval.
 //
 
 import SwiftUI
@@ -15,6 +17,8 @@ struct ChatView: View {
 
     let session: ChatSession
     let onConfigure: () -> Void
+    let onShowHistory: () -> Void
+    let onShowSettings: () -> Void
 
     @State private var draft = ""
     @State private var autoScroll = ChatAutoScrollController()
@@ -26,17 +30,30 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 transcript
                 Divider()
-                errorLabel
+                cards
                 composer
             }
             .navigationTitle(session.title.isEmpty ? "Chat" : session.title)
             .toolbar {
                 ToolbarItem(placement: .navigation) {
-                    Button("Backend", systemImage: "gearshape", action: onConfigure)
-                        .disabled(session.isStreaming)
+                    Menu {
+                        Button("Backend", systemImage: "gearshape", action: onConfigure)
+                        Button("Settings", systemImage: "puzzlepiece.extension", action: onShowSettings)
+                        Button("History", systemImage: "clock", action: onShowHistory)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .disabled(session.isStreaming)
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Plan mode", systemImage: session.planMode ? "hammer.fill" : "hammer") {
+                        session.setPlanMode(!session.planMode)
+                    }
+                    .disabled(session.isStreaming)
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button("New", systemImage: "square.and.pencil") {
+                        session.save()
                         session.newChat()
                     }
                     .disabled(session.isStreaming)
@@ -44,6 +61,11 @@ struct ChatView: View {
             }
         }
         .chatPalette(.default)
+        // Persists whatever landed in the transcript once a run settles,
+        // whether it finished, was stopped, or hit the turn cap.
+        .onChange(of: session.isStreaming) { wasStreaming, isStreaming in
+            if wasStreaming, !isStreaming { session.save() }
+        }
     }
 
     // MARK: - Transcript
@@ -106,16 +128,34 @@ struct ChatView: View {
         case .assistant:
             StreamingTextView(text: message.content)
 
-        case .toolCall, .toolResult:
-            // No tool providers are configured, so these never arrive.
-            EmptyView()
+        case .toolCall(let name), .toolResult(let name):
+            // MCP tools arrive on both platforms; the file and shell tools
+            // only on macOS. Either way, showing which tool ran is most of
+            // what makes an agent legible.
+            Label(name, systemImage: message.status == .incomplete
+                  ? "exclamationmark.triangle" : "wrench.and.screwdriver")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
-    // MARK: - Error
+    // MARK: - Agent cards
 
     @ViewBuilder
-    private var errorLabel: some View {
+    private var cards: some View {
+        if !session.todos.isEmpty {
+            TodoListPanelView(todos: session.todos).padding([.horizontal, .top], 10)
+        }
+        if let request = session.permissions.pending {
+            PermissionRequestView(request: request, permissions: session.permissions)
+                .padding([.horizontal, .top], 10)
+        }
+        if let questions = session.questions.pending {
+            QuestionCardView(questions: questions,
+                             service: session.questions,
+                             assistantName: "The demo")
+                .padding([.horizontal, .top], 10)
+        }
         if let error = session.error {
             Label(error, systemImage: "exclamationmark.triangle")
                 .font(.caption)

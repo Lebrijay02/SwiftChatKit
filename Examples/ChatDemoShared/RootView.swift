@@ -9,19 +9,40 @@
 
 import SwiftUI
 import ChatCore
+import ChatMCP
+#if os(macOS)
+import ChatTools
+#endif
 
 struct RootView: View {
 
     @State private var session: ChatSession?
     @State private var isConfiguring = false
+    @State private var isShowingHistory = false
+    @State private var isShowingSettings = false
 
     @State private var configuration = DemoConfigurationStore.load() ?? .initial
     @State private var apiKey = DemoConfigurationStore.loadAPIKey()
 
+    /// Seeded with the public test servers in `DefaultMCPServers`; persists
+    /// under the same name across both platforms, so it lives for the app,
+    /// not the session. `.http` transport works cross-platform, so it is
+    /// offered to both apps, unlike the macOS-only file and shell tools.
+    private let mcpManager = MCPManager(
+        store: MCPServerStore(),
+        seedServers: DefaultMCPServers.all)
+
+    private let historyStore = ChatHistoryStore.applicationSupport(
+        Bundle.main.bundleIdentifier ?? "ChatDemo")
+
     var body: some View {
         Group {
             if let session {
-                ChatView(session: session) { isConfiguring = true }
+                ChatView(
+                    session: session,
+                    onConfigure: { isConfiguring = true },
+                    onShowHistory: { isShowingHistory = true },
+                    onShowSettings: { isShowingSettings = true })
             } else {
                 unconfigured
             }
@@ -33,6 +54,16 @@ struct RootView: View {
                 // Nothing to go back to until a session exists.
                 onCancel: session == nil ? nil : { isConfiguring = false },
                 onSave: start)
+        }
+        .sheet(isPresented: $isShowingHistory) {
+            if let session {
+                HistoryView(historyStore: historyStore, session: session) {
+                    isShowingHistory = false
+                }
+            }
+        }
+        .sheet(isPresented: $isShowingSettings) {
+            SettingsView(mcpManager: mcpManager) { isShowingSettings = false }
         }
         // Dismissing the launch gate by swiping would leave the app with no
         // backend and no way back to the sheet.
@@ -68,9 +99,41 @@ struct RootView: View {
         self.configuration = configuration
         self.apiKey = apiKey
 
-        // `.default` is the persona that describes no tools, which matches a
-        // session that has none.
-        session = ChatSession(configuration: .init(backend: backend, persona: .default))
+        var toolProviders: [any ToolProvider] = [mcpManager]
+        var workingDirectory: URL?
+        var persona = ChatPersona.default
+        var skills = SkillsConfiguration.disabled
+        var enableAgentTools = false
+        var autoAllowedTools: Set<String> = []
+
+        #if os(macOS)
+        // The file and shell tools are `os(macOS)` only — see `ChatTools`'s
+        // `ShellToolProvider` — so this is the only platform that gets a
+        // filesystem to work in, a persona that describes doing so, and
+        // `~/.claude/skills`, the same folder Claude Code reads. iOS has no
+        // home directory a user manages, so skills stay off there.
+        workingDirectory = FileManager.default.homeDirectoryForCurrentUser
+        toolProviders.append(FileToolProvider(fileSystem: LocalFileSystem(root: workingDirectory!)))
+        toolProviders.append(ShellToolProvider())
+        persona = .codingAgent
+        skills = .claudeCompatible
+        enableAgentTools = true
+        autoAllowedTools = FileToolProvider.readOnlyNames
+        #endif
+
+        session = ChatSession(configuration: .init(
+            backend: backend,
+            toolProviders: toolProviders,
+            persona: persona,
+            workingDirectory: workingDirectory,
+            skills: skills,
+            enableTodos: enableAgentTools,
+            enableQuestions: enableAgentTools,
+            autoAllowedTools: autoAllowedTools,
+            permissionStore: EphemeralPermissionStore(),
+            historyStore: historyStore))
+
+        Task { await mcpManager.loadAndConnectEnabled() }
         isConfiguring = false
     }
 }

@@ -11,6 +11,8 @@
 		D78B2FF23038BA4900DC0E4A /* SwiftChatKitUI in Frameworks */ = {isa = PBXBuildFile; productRef = D78B2FF13038BA4900DC0E4A /* SwiftChatKitUI */; };
 		D78B2FF43038BA4900DC0E4A /* SwiftChatKitGemini in Frameworks */ = {isa = PBXBuildFile; productRef = D78B2FF33038BA4900DC0E4A /* SwiftChatKitGemini */; };
 		D78B300D303CA14D00DC0E4A /* SwiftChatKitOpenAI in Frameworks */ = {isa = PBXBuildFile; productRef = D78B300C303CA14D00DC0E4A /* SwiftChatKitOpenAI */; };
+		AA00000200000000000000C2 /* SwiftChatKitTools in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000300000000000000C3 /* SwiftChatKitTools */; };
+		AA00000400000000000000C4 /* SwiftChatKitMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000500000000000000C5 /* SwiftChatKitMCP */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -39,6 +41,8 @@
 				D78B2FF23038BA4900DC0E4A /* SwiftChatKitUI in Frameworks */,
 				D78B2FF43038BA4900DC0E4A /* SwiftChatKitGemini in Frameworks */,
 				D78B300D303CA14D00DC0E4A /* SwiftChatKitOpenAI in Frameworks */,
+				AA00000200000000000000C2 /* SwiftChatKitTools in Frameworks */,
+				AA00000400000000000000C4 /* SwiftChatKitMCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -95,6 +99,8 @@
 				D78B2FF13038BA4900DC0E4A /* SwiftChatKitUI */,
 				D78B2FF33038BA4900DC0E4A /* SwiftChatKitGemini */,
 				D78B300C303CA14D00DC0E4A /* SwiftChatKitOpenAI */,
+				AA00000300000000000000C3 /* SwiftChatKitTools */,
+				AA00000500000000000000C5 /* SwiftChatKitMCP */,
 			);
 			productName = ChatDemoMac;
 			productReference = D78B2FDE3038AC4C00DC0E4A /* ChatDemoMac.app */;
@@ -381,6 +387,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = D78B2FEE3038BA4900DC0E4A /* XCLocalSwiftPackageReference "../.." */;
 			productName = SwiftChatKitOpenAI;
+		};
+		AA00000300000000000000C3 /* SwiftChatKitTools */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D78B2FEE3038BA4900DC0E4A /* XCLocalSwiftPackageReference "../.." */;
+			productName = SwiftChatKitTools;
+		};
+		AA00000500000000000000C5 /* SwiftChatKitMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D78B2FEE3038BA4900DC0E4A /* XCLocalSwiftPackageReference "../.." */;
+			productName = SwiftChatKitMCP;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

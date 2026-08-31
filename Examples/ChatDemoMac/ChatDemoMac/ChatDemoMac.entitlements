@@ -2,10 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Agent access means `ShellToolProvider` launching arbitrary commands and
+	     `FileToolProvider` reading and writing anywhere under the user's home
+	     directory. The App Sandbox has no entitlement that permits either —
+	     both need staying off, the same tradeoff `ChatDemo` (the SPM agent
+	     example) already makes by not sandboxing at all. -->
 	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<!-- The whole app is one outgoing HTTPS connection to whichever backend the
-	     user configured. Nothing else is needed. -->
+	<false/>
 	<key>com.apple.security.network.client</key>
 	<true/>
 </dict>
