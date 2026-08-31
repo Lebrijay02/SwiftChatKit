@@ -23,7 +23,15 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var autoScroll = ChatAutoScrollController()
 
-    private static let bottomAnchor = "bottom"
+    private static let bottomAnchor = ChatBottomAnchor.id
+
+    /// The transcript's activity, as one value: idle, thinking, or responding. The two
+    /// booleans behind it flip in the same frame at the start of a turn, and watching
+    /// them separately meant two scrolls for one visible change.
+    private var activity: Int {
+        if session.isThinking { return 2 }
+        return session.isStreaming ? 1 : 0
+    }
 
     var body: some View {
         NavigationStack {
@@ -86,21 +94,21 @@ struct ChatView: View {
                     } else if session.isStreaming {
                         ThinkingIndicatorView(label: "Responding…")
                     }
-                    Color.clear.frame(height: 1).id(Self.bottomAnchor)
+                    ChatBottomAnchor(controller: autoScroll)
                 }
                 .padding()
                 // The AppKit half of the difference: a scroll wheel is a signal
                 // the user took over. On iOS this is a `DragGesture` instead.
                 .background(ManualScrollReporter { autoScroll.userDidScroll() })
             }
+            .chatScrollViewport(autoScroll)
             // A fresh scroll view per conversation. Without this the old one keeps its
             // content offset, so switching to a shorter chat leaves the reader parked
             // past the end of it, staring at blank space.
             .id(session.sessionID)
-            .onChange(of: session.isThinking) { _, _ in
-                autoScroll.followEvent(proxy, anchor: Self.bottomAnchor)
-            }
-            .onChange(of: session.isStreaming) { _, _ in
+            // Both indicators and the gap between them are one value, so a turn starting
+            // or ending schedules a single scroll rather than two that cut each other off.
+            .onChange(of: activity) { _, _ in
                 autoScroll.followEvent(proxy, anchor: Self.bottomAnchor)
             }
             .onChange(of: session.messages.last?.content) { _, _ in

@@ -17,14 +17,6 @@
 
 import SwiftUI
 
-/// Reports how far the transcript's bottom anchor sits below the viewport.
-public struct ChatBottomOffsetKey: PreferenceKey {
-    public static let defaultValue: CGFloat = 0
-    public static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 @MainActor
 @Observable
 public final class ChatAutoScrollController {
@@ -45,6 +37,29 @@ public final class ChatAutoScrollController {
     /// Distance from the viewport bottom to the transcript's end, in points.
     private var distanceFromBottom: CGFloat = 0
 
+    /// Set once a scroll view reports its own geometry directly (iOS 18 / macOS 15).
+    /// The anchor keeps measuring itself for older systems; when both are available the
+    /// scroll view's own numbers win, so the two don't take turns overwriting each other.
+    private var usesScrollGeometry = false
+
+    /// Bottom edge of the viewport and top edge of the trailing anchor, both in global
+    /// coordinates. Either can arrive first, so the distance is recomputed from whichever
+    /// pair is current rather than from the order they land in.
+    private var viewportBottomY: CGFloat?
+    private var anchorTopY: CGFloat?
+
+    /// When the last streaming follow ran. Discrete events landing inside this window
+    /// drop their animation: a 0.22s ease-out started while unanimated frame-rate
+    /// scrolling is underway gets cut off by the very next frame, and that interruption
+    /// is the lurch. During a turn, everything scrolls the same continuous way.
+    private var lastStreamFollow: ContinuousClock.Instant?
+    private static let streamQuietWindow = Duration.milliseconds(250)
+
+    private var isStreamActive: Bool {
+        guard let lastStreamFollow else { return false }
+        return ContinuousClock.now - lastStreamFollow < Self.streamQuietWindow
+    }
+
     /// True while a whole transcript is being swapped in. The rows land over a few
     /// passes, and every one of them would otherwise start its own animated scroll —
     /// a slide through messages the reader never asked to see.
@@ -55,6 +70,29 @@ public final class ChatAutoScrollController {
     public var isAwayFromBottom: Bool { !isFollowing && distanceFromBottom > Self.pinnedThreshold }
 
     public func reportDistanceFromBottom(_ distance: CGFloat) {
+        usesScrollGeometry = true
+        apply(distance: distance)
+    }
+
+    /// Bottom edge of the transcript's viewport, in global coordinates.
+    public func reportViewportBottom(_ y: CGFloat) {
+        viewportBottomY = y
+        recomputeDistanceFromGeometry()
+    }
+
+    /// Top edge of the trailing anchor row, in global coordinates. Below the viewport
+    /// bottom means there is transcript the reader hasn't scrolled to yet.
+    public func reportAnchorTop(_ y: CGFloat) {
+        anchorTopY = y
+        recomputeDistanceFromGeometry()
+    }
+
+    private func recomputeDistanceFromGeometry() {
+        guard !usesScrollGeometry, let viewportBottomY, let anchorTopY else { return }
+        apply(distance: anchorTopY - viewportBottomY)
+    }
+
+    private func apply(distance: CGFloat) {
         distanceFromBottom = max(0, distance)
         // Coming back to the bottom re-arms following; this is the only way to re-engage,
         // which is what makes manual scroll-up stick.
@@ -64,10 +102,15 @@ public final class ChatAutoScrollController {
     }
 
     /// Called when the reader drags or scrolls by hand.
+    ///
+    /// Disengages unconditionally rather than checking the distance first. A wheel event
+    /// arrives before the layout pass it causes, so at the top of an upward scroll the
+    /// distance is still the old ~0 — testing it there means the first few events are
+    /// ignored and the reader gets dragged back down. Disengaging immediately and letting
+    /// ``reportDistanceFromBottom(_:)`` re-arm costs at most one frame of following when
+    /// the scroll turns out not to have moved anywhere.
     public func userDidScroll() {
-        if distanceFromBottom > Self.pinnedThreshold {
-            isFollowing = false
-        }
+        isFollowing = false
     }
 
     /// Follows a streaming update. No animation: at 60 fps the content grows by about a
@@ -75,6 +118,7 @@ public final class ChatAutoScrollController {
     /// smooth. Animating each step is what causes the stutter.
     public func followStream(_ proxy: ScrollViewProxy, anchor: String) {
         guard isFollowing else { return }
+        lastStreamFollow = ContinuousClock.now
         if distanceFromBottom > Self.animateAboveGap {
             withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(anchor, anchor: .bottom) }
         } else {
@@ -84,9 +128,13 @@ public final class ChatAutoScrollController {
 
     /// Follows a discrete event — a new message, a sent prompt — where a short animation
     /// helps the reader see that something was appended.
+    ///
+    /// Mid-turn there is no such gap to show: the events that fire while a model is
+    /// answering (the thinking indicator swapping out, a tool row appending) land in the
+    /// same frames as the streaming text, so they follow it unanimated instead.
     public func followEvent(_ proxy: ScrollViewProxy, anchor: String) {
         isFollowing = true
-        guard !isRestoring else {
+        guard !isRestoring, !isStreamActive else {
             proxy.scrollTo(anchor, anchor: .bottom)
             return
         }
@@ -100,6 +148,9 @@ public final class ChatAutoScrollController {
         isFollowing = true
         distanceFromBottom = 0
         isRestoring = true
+        // The incoming transcript's geometry has nothing to do with the outgoing one's.
+        anchorTopY = nil
+        lastStreamFollow = nil
         proxy.scrollTo(anchor, anchor: .bottom)
     }
 
@@ -113,6 +164,88 @@ public final class ChatAutoScrollController {
     public func jumpToBottom(_ proxy: ScrollViewProxy, anchor: String) {
         isFollowing = true
         withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(anchor, anchor: .bottom) }
+    }
+}
+
+// MARK: - Distance reporting
+
+/// The transcript's trailing row: the target every scroll aims at, and — on systems
+/// without `onScrollGeometryChange` — the thing that measures how far below the viewport
+/// the end of the transcript sits.
+///
+/// Place it last inside the scrolling stack, and put ``chatScrollViewport(_:)`` on the
+/// enclosing `ScrollView`.
+public struct ChatBottomAnchor: View {
+
+    /// The id `ScrollViewProxy` scrolls to. Pass it as the `anchor:` argument throughout.
+    public static let id = "chat.bottom"
+
+    private let controller: ChatAutoScrollController
+
+    public init(controller: ChatAutoScrollController) {
+        self.controller = controller
+    }
+
+    public var body: some View {
+        Color.clear
+            .frame(height: 1)
+            .background {
+                GeometryReader { geometry in
+                    // Reporting from `onChange` rather than straight out of the
+                    // GeometryReader's body keeps the write off the view-update pass,
+                    // which is what otherwise trips "modifying state during update".
+                    Color.clear.onChange(of: geometry.frame(in: .global).minY, initial: true) { _, y in
+                        controller.reportAnchorTop(y)
+                    }
+                }
+            }
+            .id(Self.id)
+    }
+}
+
+public extension View {
+
+    /// Marks the transcript's `ScrollView` so the controller can tell "pinned to the
+    /// bottom" from "the reader scrolled up to re-read something".
+    func chatScrollViewport(_ controller: ChatAutoScrollController) -> some View {
+        modifier(ChatScrollViewportModifier(controller: controller))
+    }
+}
+
+private struct ChatScrollViewportModifier: ViewModifier {
+
+    let controller: ChatAutoScrollController
+
+    func body(content: Content) -> some View {
+        // Anchoring the content to the bottom means growth extends downward from a
+        // position the scroll view already holds, instead of being chased frame by frame.
+        // From iOS 18 / macOS 15 that extends to size changes, which covers streaming
+        // outright; before then it still gets the transcript to open in the right place.
+        Group {
+            if #available(iOS 18.0, macOS 15.0, *) {
+                content
+                    .defaultScrollAnchor(.bottom)
+                    .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                    // The scroll view's own geometry: exact, cheap, and updated during
+                    // the drag rather than a layout pass behind it.
+                    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.contentSize.height + geometry.contentInsets.bottom
+                            - geometry.contentOffset.y - geometry.containerSize.height
+                    } action: { _, distance in
+                        controller.reportDistanceFromBottom(distance)
+                    }
+            } else {
+                content
+                    .defaultScrollAnchor(.bottom)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.onChange(of: geometry.frame(in: .global).maxY, initial: true) { _, y in
+                                controller.reportViewportBottom(y)
+                            }
+                        }
+                    }
+            }
+        }
     }
 }
 

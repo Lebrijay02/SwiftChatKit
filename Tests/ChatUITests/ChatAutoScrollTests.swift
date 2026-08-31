@@ -31,7 +31,13 @@ struct ChatAutoScrollTests {
     func smallScrollKeepsFollowing() {
         let controller = ChatAutoScrollController()
         controller.reportDistanceFromBottom(10)
+
+        // A scroll event disengages on arrival, before the layout it causes has
+        // happened — the controller cannot yet know whether it moved anywhere.
         controller.userDidScroll()
+        // The layout lands, the transcript turns out not to have gone anywhere, and
+        // following re-arms. This is the twitch surviving, one frame later.
+        controller.reportDistanceFromBottom(10)
         #expect(controller.isFollowing)
     }
 
@@ -76,6 +82,40 @@ struct ChatAutoScrollTests {
         // Bounce scrolling can push the anchor above the viewport bottom.
         controller.reportDistanceFromBottom(-120)
         controller.userDidScroll()
+        controller.reportDistanceFromBottom(-120)
         #expect(controller.isFollowing)
+        #expect(!controller.isAwayFromBottom, "past the end is not away from it")
+    }
+
+    @Test("Viewport and anchor edges combine into a distance, in either order")
+    func geometryPairComposes() {
+        let controller = ChatAutoScrollController()
+
+        // One edge alone says nothing; the distance stays at its initial pinned value.
+        controller.reportAnchorTop(900)
+        controller.userDidScroll()
+        #expect(!controller.isAwayFromBottom, "one edge is not a measurement")
+
+        // The anchor sits 400pt below the viewport's bottom edge: scrolled well up.
+        controller.reportViewportBottom(500)
+        #expect(controller.isAwayFromBottom)
+
+        // And the anchor rising back to the viewport's edge re-arms following.
+        controller.reportAnchorTop(500)
+        #expect(controller.isFollowing)
+    }
+
+    @Test("A scroll view reporting its own geometry supersedes the anchor's")
+    func scrollGeometryWins() {
+        let controller = ChatAutoScrollController()
+        controller.reportViewportBottom(500)
+        controller.reportDistanceFromBottom(400)
+        controller.userDidScroll()
+        #expect(controller.isAwayFromBottom)
+
+        // A stale anchor measurement from the older path must not overwrite it.
+        controller.reportAnchorTop(500)
+        #expect(controller.isAwayFromBottom)
+        #expect(!controller.isFollowing)
     }
 }
