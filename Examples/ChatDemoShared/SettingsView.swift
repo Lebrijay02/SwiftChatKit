@@ -15,10 +15,12 @@ import ChatMCP
 struct SettingsView: View {
 
     let mcpManager: MCPManager
+    let session: ChatSession?
     let onDismiss: () -> Void
 
     @State private var servers: [MCPServerConfig] = []
     @State private var statuses: [UUID: MCPServerStatus] = [:]
+    @State private var autoApproveTools = DemoConfigurationStore.autoApproveTools
     #if os(macOS)
     @State private var skills: [AgentSkill] = []
     #endif
@@ -26,6 +28,16 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Toggle("Never ask before using tools", isOn: autoApproveBinding)
+                } header: {
+                    Text("Tool permissions")
+                } footer: {
+                    Text("Off asks before file writes, shell commands, and other "
+                         + "mutating tools. On approves everything automatically, "
+                         + "with no review — including edits and shell commands.")
+                }
+
                 Section {
                     ForEach(servers) { server in
                         row(for: server)
@@ -102,6 +114,16 @@ struct SettingsView: View {
         case .needsAuth: return "Needs authentication"
         case .failed(let message): return "Failed: \(message)"
         }
+    }
+
+    private var autoApproveBinding: Binding<Bool> {
+        Binding(
+            get: { autoApproveTools },
+            set: { newValue in
+                autoApproveTools = newValue
+                DemoConfigurationStore.autoApproveTools = newValue
+                session?.permissions.autoApproveAll = newValue
+            })
     }
 
     private func enabledBinding(for server: MCPServerConfig) -> Binding<Bool> {

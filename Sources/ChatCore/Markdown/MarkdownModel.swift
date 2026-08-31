@@ -64,6 +64,13 @@ public struct MarkdownTable: Equatable, Sendable {
         self.alignments = alignments
         self.rows = rows
     }
+
+    /// GFM requires the header row to be present, but it may be blank — key/value
+    /// tables are often written that way. A blank one carries nothing, so renderers
+    /// skip it rather than showing an empty band above the first real row.
+    public var hasHeader: Bool {
+        headers.contains { !$0.isEmpty }
+    }
 }
 
 public struct MarkdownDefinition: Equatable, Sendable {

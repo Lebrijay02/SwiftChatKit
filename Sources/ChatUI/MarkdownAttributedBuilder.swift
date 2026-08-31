@@ -42,6 +42,19 @@ public enum MarkdownAttributedBuilder {
     /// reads it back to lay out backgrounds without re-deriving ranges.
     public static let codeBlockAttribute = NSAttributedString.Key("SwiftChatKitMarkdownCodeBlock")
 
+    /// Marks a table's whole range so the text view can stroke one rounded outer
+    /// border around it. `NSTextTable`'s own per-cell borders are left in place for
+    /// the internal grid, but its automatic layout doesn't reliably land the last
+    /// column's edge on the container boundary — the outer border needs a pass
+    /// that doesn't depend on that.
+    public static let tableAttribute = NSAttributedString.Key("SwiftChatKitMarkdownTable")
+
+    /// Marks a table's header row range so the text view can fill it with a shape
+    /// that respects the outer border's corner radius at the top. The native
+    /// `NSTextTableBlock.backgroundColor` fill is square-cornered, and pokes past
+    /// that curve — this replaces it rather than layering on top of it.
+    public static let tableHeaderAttribute = NSAttributedString.Key("SwiftChatKitMarkdownTableHeader")
+
     public static func build(_ blocks: [MarkdownBlock], style: MarkdownStyle) -> MarkdownRenderResult {
         let result = NSMutableAttributedString()
         var regions: [MarkdownCodeRegion] = []
@@ -160,6 +173,13 @@ public enum MarkdownAttributedBuilder {
             attributes[codeBlockAttribute] = nil
             attributes[quoteDepthAttribute] = nil
             attributes[thematicBreakAttribute] = nil
+            attributes[tableAttribute] = nil
+            attributes[tableHeaderAttribute] = nil
+            // A code block's or table's paragraph style carries indents, spacing, and —
+            // for tables — an NSTextTableBlock with its own border and padding. Left in
+            // place, the separator becomes one more (empty) cell or code line, padding
+            // out whatever follows it. Only the font/color need to survive.
+            attributes[.paragraphStyle] = nil
         }
         text.append(NSAttributedString(string: "\n", attributes: attributes))
     }
@@ -362,6 +382,8 @@ public enum MarkdownAttributedBuilder {
         let headerFont = PlatformFont.chatSystem(size: style.bodyFontSize * 0.95, weight: .semibold)
         let bodyFont = PlatformFont.chatSystem(size: style.bodyFontSize * 0.95)
 
+        let rowCount = (table.hasHeader ? 1 : 0) + table.rows.count
+
         func appendRow(_ cells: [[MarkdownInline]], row: Int, font: PlatformFont, isHeader: Bool) {
             for column in 0..<columnCount {
                 let block = NSTextTableBlock(table: textTable, startingRow: row, rowSpan: 1,
@@ -369,7 +391,19 @@ public enum MarkdownAttributedBuilder {
                 block.setBorderColor(style.dividerColor)
                 block.setWidth(1, type: .absoluteValueType, for: .border)
                 block.setWidth(6, type: .absoluteValueType, for: .padding)
-                if isHeader { block.backgroundColor = style.codeBackground }
+                // The outer edges are left to MarkdownDecoration, which strokes one
+                // rounded rect around the whole table. Drawn here too they would be
+                // a square rectangle underneath it, and no rounded path can mask a
+                // square corner — the corners poked out. Only the interior grid
+                // lines are the native table's to draw.
+                if row == 0 { block.setWidth(0, type: .absoluteValueType, for: .border, edge: .minY) }
+                if row == rowCount - 1 { block.setWidth(0, type: .absoluteValueType, for: .border, edge: .maxY) }
+                if column == 0 { block.setWidth(0, type: .absoluteValueType, for: .border, edge: .minX) }
+                if column == columnCount - 1 {
+                    block.setWidth(0, type: .absoluteValueType, for: .border, edge: .maxX)
+                }
+                // The header's background is filled by MarkdownDecoration too, for
+                // the same reason: its square corners overhung the rounded border.
 
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.textBlocks = [block]
@@ -390,10 +424,21 @@ public enum MarkdownAttributedBuilder {
             }
         }
 
-        appendRow(table.headers, row: 0, font: headerFont, isHeader: true)
-        for (index, row) in table.rows.enumerated() {
-            appendRow(row, row: index + 1, font: bodyFont, isHeader: false)
+        // A blank header row is skipped entirely rather than rendered as an empty
+        // band; the body rows then start at row 0 so the table stays contiguous.
+        var nextRow = 0
+        if table.hasHeader {
+            let headerStart = out.length
+            appendRow(table.headers, row: nextRow, font: headerFont, isHeader: true)
+            out.addAttribute(tableHeaderAttribute, value: true,
+                             range: NSRange(location: headerStart, length: out.length - headerStart))
+            nextRow += 1
         }
+        for row in table.rows {
+            appendRow(row, row: nextRow, font: bodyFont, isHeader: false)
+            nextRow += 1
+        }
+        out.addAttribute(tableAttribute, value: true, range: NSRange(location: 0, length: out.length))
         return out
     }
 
@@ -428,11 +473,12 @@ public enum MarkdownAttributedBuilder {
             out.append(NSAttributedString(string: "\n"))
         }
 
-        appendRow(table.headers, font: headerFont)
+        if table.hasHeader { appendRow(table.headers, font: headerFont) }
         for row in table.rows { appendRow(row, font: bodyFont) }
 
         out.addAttribute(.paragraphStyle, value: paragraph,
                          range: NSRange(location: 0, length: out.length))
+        out.addAttribute(tableAttribute, value: true, range: NSRange(location: 0, length: out.length))
         return out
     }
 

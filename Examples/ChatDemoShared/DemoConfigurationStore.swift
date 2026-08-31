@@ -35,6 +35,18 @@ enum DemoConfigurationStore {
         saveAPIKey("")
     }
 
+    // MARK: - Tool permissions
+
+    /// "Never ask" — every tool call auto-approves, file writes and shell
+    /// commands included. Off by default; a host that flips this on should
+    /// make the risk visible in its own UI (`SettingsView` does).
+    private static let autoApproveToolsKey = "ChatDemo.autoApproveTools"
+
+    static var autoApproveTools: Bool {
+        get { UserDefaults.standard.bool(forKey: autoApproveToolsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: autoApproveToolsKey) }
+    }
+
     // MARK: - API key
 
     static func loadAPIKey() -> String {

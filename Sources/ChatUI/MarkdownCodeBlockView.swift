@@ -55,19 +55,17 @@ public struct MarkdownCodeBlockView: View {
     /// collapsed block has nothing hidden to scroll to.
     private var frameHeight: CGFloat { max(visibleHeight, lineHeight) + 16 }
 
+    private var fontSize: CGFloat { PlatformFont.chatBodySize * 0.95 }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().frame(height: 0.5).overlay(palette.divider)
             CodeScrollView(
                 code: code,
-                fontSize: PlatformFont.chatBodySize * 0.95,
+                fontSize: fontSize,
                 textColor: PlatformColor.from(chat: palette.primaryText),
-                maxHeight: frameHeight,
-                onMeasure: { size, line in
-                    contentSize = size
-                    lineHeight = line
-                }
+                maxHeight: frameHeight
             )
             .frame(height: frameHeight)
             .clipped()
@@ -87,9 +85,26 @@ public struct MarkdownCodeBlockView: View {
             }
         }
         .background(palette.codeBackground)
+        // `CodeScrollView` is a native NSView/UIView, not a SwiftUI layer — without
+        // flattening the stack first, its corner can render past the mask below and
+        // survive as a stray square poking out of the rounded corner.
+        .compositingGroup()
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.divider, lineWidth: 0.5))
         .padding(.vertical, 4)
+        // Sized from the text alone, tied only to what could actually change it —
+        // never to the live view's own render cycle. `CodeScrollView` never wraps,
+        // so a window resize changes its available width but never its content
+        // height; measuring from `updateNSView` anyway (as this used to) fed a
+        // spurious remeasure through an async `@State` round trip on every resize
+        // tick, one frame behind the drag — the outer frame briefly committed at a
+        // stale height and the next message overlapped it.
+        .onAppear { measure() }
+        .onChange(of: code) { _, _ in measure() }
+    }
+
+    private func measure() {
+        (contentSize, lineHeight) = CodeScrollView.measure(code: code, fontSize: fontSize)
     }
 
     private var header: some View {
@@ -177,7 +192,6 @@ private struct CodeScrollView {
     /// hidden lines are never laid out into scrollable space — the block cuts off
     /// instead of turning into a vertical scroller.
     let maxHeight: CGFloat
-    let onMeasure: (CGSize, CGFloat) -> Void
 
     /// TextKit 1 ownership runs storage -> layout manager -> container, and the
     /// back-references are weak. The text view here is a stock one with nowhere to
@@ -225,6 +239,27 @@ private struct CodeScrollView {
         let lineHeight = font.lineHeight
         #endif
         return (size, lineHeight + paragraph.lineSpacing)
+    }
+
+    /// A throwaway TextKit stack just to measure — used by `MarkdownCodeBlockView`
+    /// to size itself from `code` alone, independent of any live NSView/UIView and
+    /// its own render cycle. See the call site for why that independence matters.
+    static func measure(code: String, fontSize: CGFloat) -> (size: CGSize, lineHeight: CGFloat) {
+        let view = CodeScrollView(code: code, fontSize: fontSize,
+                                  textColor: .clear, maxHeight: 0)
+        let (string, paragraph) = view.attributed()
+
+        let storage = NSTextStorage(attributedString: string)
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: unbounded)
+        container.widthTracksTextView = false
+        container.lineFragmentPadding = 0
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+
+        let (size, lineHeight) = view.measure(layoutManager: layoutManager, container: container,
+                                              paragraph: paragraph)
+        return (size, lineHeight)
     }
 }
 
@@ -301,16 +336,13 @@ extension CodeScrollView: NSViewRepresentable {
             textView.textStorage?.setAttributedString(string)
         }
 
-        let (size, line) = measure(layoutManager: layoutManager, container: container,
-                                   paragraph: paragraph)
+        let (size, _) = measure(layoutManager: layoutManager, container: container,
+                                paragraph: paragraph)
         let height = min(size.height + 16, maxHeight)
         textView.minSize = CGSize(width: size.width, height: max(height - 16, 0))
         textView.maxSize = CGSize(width: Self.unbounded.width, height: height)
         textView.frame = NSRect(origin: .zero,
                                 size: CGSize(width: size.width + 24, height: height))
-
-        let report = onMeasure
-        Task { @MainActor in report(size, line) }
     }
 }
 
@@ -364,16 +396,13 @@ extension CodeScrollView: UIViewRepresentable {
             textView.textStorage.setAttributedString(string)
         }
 
-        let (size, line) = measure(layoutManager: layoutManager, container: container,
-                                   paragraph: paragraph)
+        let (size, _) = measure(layoutManager: layoutManager, container: container,
+                                paragraph: paragraph)
         let frame = CGRect(origin: .zero,
                            size: CGSize(width: size.width + 24,
                                         height: min(size.height + 16, maxHeight)))
         textView.frame = frame
         scrollView.contentSize = frame.size
-
-        let report = onMeasure
-        Task { @MainActor in report(size, line) }
     }
 }
 

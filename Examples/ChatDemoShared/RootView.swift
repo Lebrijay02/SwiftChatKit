@@ -63,7 +63,7 @@ struct RootView: View {
             }
         }
         .sheet(isPresented: $isShowingSettings) {
-            SettingsView(mcpManager: mcpManager) { isShowingSettings = false }
+            SettingsView(mcpManager: mcpManager, session: session) { isShowingSettings = false }
         }
         // Dismissing the launch gate by swiping would leave the app with no
         // backend and no way back to the sheet.
@@ -132,6 +132,8 @@ struct RootView: View {
             autoAllowedTools: autoAllowedTools,
             permissionStore: EphemeralPermissionStore(),
             historyStore: historyStore))
+
+        session?.permissions.autoApproveAll = DemoConfigurationStore.autoApproveTools
 
         Task { await mcpManager.loadAndConnectEnabled() }
         isConfiguring = false

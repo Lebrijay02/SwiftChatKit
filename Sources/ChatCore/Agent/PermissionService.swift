@@ -103,18 +103,28 @@ public final class PermissionService {
     /// because which tools are safe depends on which providers are installed.
     public let autoAllowed: Set<String>
 
+    /// Global override: when set, nothing prompts, regardless of tool name.
+    /// Unlike `autoAllowed`/`alwaysAllowed` — which only cover tools known by
+    /// name up front — this also silences tools a host has no static list for,
+    /// such as an MCP server's. A host offering this as a user-facing choice
+    /// should make the risk explicit: it approves file writes and shell
+    /// commands with no review.
+    public var autoApproveAll: Bool
+
     private var continuation: CheckedContinuation<PermissionDecision, Never>?
     private let store: PermissionStore
 
     public init(autoAllowed: Set<String> = [],
+                autoApproveAll: Bool = false,
                 store: PermissionStore = UserDefaultsPermissionStore()) {
         self.autoAllowed = autoAllowed
+        self.autoApproveAll = autoApproveAll
         self.store = store
         self.alwaysAllowed = store.load()
     }
 
     public func requiresApproval(_ toolName: String) -> Bool {
-        !autoAllowed.contains(toolName) && !alwaysAllowed.contains(toolName)
+        !autoApproveAll && !autoAllowed.contains(toolName) && !alwaysAllowed.contains(toolName)
     }
 
     /// Suspends until the host answers. One request at a time — the agent loop
