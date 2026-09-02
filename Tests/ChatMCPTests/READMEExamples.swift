@@ -49,6 +49,42 @@ struct ChatMCPREADMEExamples {
         #expect(servers.map(\.name) == ["filesystem"])
     }
 
+    @Test("A stdio server with its own environment and directory")
+    func stdioEnvironment() {
+        let config = MCPServerConfig(
+            name: "Frida",
+            transport: .stdio(command: "uv",
+                              arguments: ["run", "python", "main.py"],
+                              environment: ["AZURE_API_KEY": "from-keychain"],
+                              workingDirectory: URL(fileURLWithPath: "/srv/frida-mcp")),
+            requestTimeoutSeconds: 3600)
+        #expect(config.requestTimeout == .seconds(3600))
+    }
+
+    @Test("Timeouts, cancellation and progress on long calls")
+    func longCalls() async {
+        let swarm = MCPServerConfig(name: "Swarm",
+                                    transport: .stdio(command: "uv", arguments: []),
+                                    requestTimeoutSeconds: 3600)
+        let manager = MCPManager(
+            store: MCPServerStore(defaults: UserDefaults(suiteName: "readme.\(UUID())")!),
+            seedServers: [swarm],
+            requestTimeout: .seconds(120),
+            onProgress: { update in
+                _ = (update.fraction, update.message)   // drive a progress bar
+            })
+        await manager.cancelActiveCalls()
+        #expect(await manager.declarations.isEmpty)
+    }
+
+    @Test("Answering a server's elicitation from the host")
+    func elicitation() async {
+        let manager = MCPManager(
+            store: MCPServerStore(defaults: UserDefaults(suiteName: "readme.\(UUID())")!),
+            elicitation: Elicitation())
+        #expect(await manager.servers.isEmpty)
+    }
+
     @Test("Observing connection state from a host")
     func observeStatus() async {
         let manager = MCPManager(
@@ -60,6 +96,19 @@ struct ChatMCPREADMEExamples {
             })
         await manager.loadAndConnectEnabled()
         #expect(await manager.declarations.isEmpty)
+    }
+}
+
+/// The README's elicitation handler.
+private struct Elicitation: MCPElicitationHandler {
+    func elicit(_ request: MCPElicitationRequest) async -> MCPElicitationResponse {
+        // A real host suspends here until the user answers.
+        guard let answers = present(request) else { return .declined }
+        return MCPElicitationResponse(action: .accept, content: answers)
+    }
+
+    private func present(_ request: MCPElicitationRequest) -> [String: ChatValue]? {
+        request.fields.isEmpty ? nil : [request.fields[0].key: .string("")]
     }
 }
 

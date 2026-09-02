@@ -531,6 +531,30 @@ Two behaviours to know:
 `derivedTitle(from:)` takes the first non-empty line of the first user message,
 truncated to 60 characters, falling back to `"New chat"`.
 
+### Host data alongside a transcript
+
+`StoredSession.metadata` is an opaque `[String: ChatValue]` the package never
+reads. It exists so a host with its own per-session record — a log of runs, a
+build status — doesn't need a second file that is one crash away from
+disagreeing with the transcript it describes.
+
+```swift
+let configuration = ChatSessionConfiguration(
+    backend: backend,
+    historyStore: ChatHistoryStore(directory: projectURL.appending(path: ".chat")),
+    sessionMetadata: { ["runs": .array(runs)] },
+    onSessionMetadataLoaded: { metadata in runs = metadata["runs"]?.arrayValue ?? [] })
+```
+
+`sessionMetadata` is called on every `save()`; `onSessionMetadataLoaded` is
+called on every `load(_:)` — including with an empty dictionary for a transcript
+saved before the host had anything to store, since the host has to clear the
+last session's state either way. A file written without the field decodes as
+`nil`, so existing transcripts keep loading.
+
+If you'd rather write the transcript through your own store, `session.snapshot()`
+returns exactly what `save()` would have written.
+
 ## Building the system prompt
 
 The persona is a set of independent blocks rather than one blob, because most of
@@ -678,7 +702,7 @@ For OpenAI itself there is nothing to configure but a key:
 let backend = OpenAIBackend(apiKey: key, model: .gpt5)
 ```
 
-A `baseURL` typed by the user -.,m. cz|6vc,is likelier to arrive as a string, so there is a
+A `baseURL` typed by the user is likelier to arrive as a string, so there is a
 failable initializer that validates it instead of trapping:
 
 ```swift
@@ -932,8 +956,33 @@ the user has saved — seeds never resurrect a server the user disabled.
 
 | Transport | Availability | Notes |
 |---|---|---|
-| `.stdio(command:arguments:)` | macOS only | Launches a child process. `PATH` is augmented with the usual Homebrew and `nvm` locations, because a GUI app inherits launchd's minimal `PATH` and would not otherwise find `npx`. |
+| `.stdio(command:arguments:environment:workingDirectory:)` | macOS only | Launches a child process. `PATH` is augmented with the usual Homebrew and `nvm` locations, because a GUI app inherits launchd's minimal `PATH` and would not otherwise find `npx`. |
 | `.http(url:auth:)` | macOS and iOS | Streamable HTTP. `auth` is `.none`, `.bearer(token:)`, or `.oauth`. |
+
+A stdio server that needs credentials or a directory of its own takes both:
+
+```swift
+MCPServerConfig(
+    name: "Frida",
+    transport: .stdio(command: "uv",
+                      arguments: ["run", "python", "main.py"],
+                      environment: ["AZURE_API_KEY": keychain.azureKey],
+                      workingDirectory: URL(fileURLWithPath: "/srv/frida-mcp")),
+    requestTimeoutSeconds: 3600)
+```
+
+`environment` is merged *over* the inherited environment, so a caller can
+override `PATH` and everyone who passes nothing still gets the augmentation.
+`workingDirectory` overrides the session's when set, for a server that lives
+somewhere other than the user's project. Swift does not allow default values on
+an enum case's associated values, so `.stdio(command:arguments:)` and the
+two three-argument spellings exist as static overloads.
+
+**`environment` is never persisted.** It holds the secrets the server needs, and
+`MCPServerStore` writes to `UserDefaults` — credentials in a plist on disk is not
+a thing to ship. `loadOrSeed(with:)` re-applies each seed's environment onto the
+stored server on every launch, so the host supplies them fresh from its keychain
+and the user's own edits to the rest of the config survive.
 
 OAuth is a seam, not an implementation: a server configured with `.oauth` is
 reported as `.needsAuth` unless you supply an `MCPAuthorizationProvider`. The
@@ -980,6 +1029,70 @@ let manager = MCPManager(store: MCPServerStore()) { statuses in
 
 A call to a dead server is retried once after reconnecting. Stdio children die
 quietly, and a crashed child looks exactly like a failed call until you try again.
+A call the user cancelled is not retried — running the work they just stopped
+again is the last thing they asked for.
+
+### Long calls: timeouts, cancellation and progress
+
+Every outbound call has a deadline. It defaults to two minutes, which a
+multi-agent swarm run blows through routinely, so it is settable per manager and
+per server:
+
+```swift
+let manager = MCPManager(store: MCPServerStore(),
+                         seedServers: [swarm],          // requestTimeoutSeconds: 3600
+                         requestTimeout: .seconds(120), // everyone else
+                         onProgress: { update in
+                             progressBar.show(update.fraction, update.message)
+                         })
+```
+
+`cancelActiveCalls()` sends `notifications/cancelled` for everything in flight
+and fails each pending call, so a user pressing Stop doesn't strand a
+twenty-minute run on the far side. Progress notifications are only requested
+when an observer is watching — a server told to report progress nobody reads is
+doing work for nothing.
+
+Inbound requests are deliberately outside all of this: a person answering a
+prompt can legitimately take ten minutes.
+
+### Elicitation: when the server asks the user
+
+`elicitation/create` runs the other way round — the server parks its own tool
+call and waits on a human. The package declares the capability and routes the
+request; the host renders the UI and decides.
+
+```swift
+struct Elicitation: MCPElicitationHandler {
+    func elicit(_ request: MCPElicitationRequest) async -> MCPElicitationResponse {
+        // Suspend until the user answers. Returning is what unblocks the
+        // server's tool call.
+        guard let answers = await sheets.present(request) else { return .declined }
+        return MCPElicitationResponse(action: .accept, content: answers)
+    }
+}
+
+let manager = MCPManager(store: MCPServerStore(), elicitation: Elicitation())
+```
+
+The capability is advertised **only** when a handler is supplied. A client that
+declares `elicitation` and never answers is worse than one that stays quiet,
+because the server waits instead of falling back.
+
+`request.fields` is the requested schema, already parsed: `.string`, `.boolean`,
+`.number`, `.integer`, `.singleChoice` (`{"type":"string","enum":[…]}`) and
+`.multiChoice` (`{"type":"array","items":{"enum":[…]}}`). An unrecognised type
+reads as `.string` rather than failing the request, and `title` falls back to the
+property key. `request.url` is set for the URL form used in OAuth hand-offs,
+where there is a page to open rather than a form to fill in.
+
+Nothing is left hanging. Without a handler an elicitation is *declined* rather
+than dropped, `ping` is answered, and any other server-initiated method gets a
+JSON-RPC `-32601` — a server waiting on an unanswered request hangs exactly as
+badly as one waiting on a dropped one.
+
+This is a different direction from `askUser`, which is the *model* asking. Both
+can be on at once.
 
 ---
 

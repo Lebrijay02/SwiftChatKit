@@ -62,6 +62,15 @@ public struct ChatSessionConfiguration: Sendable {
     public var compressor: (any ContextCompressor)?
     public var telemetry: (any ChatTelemetry)?
 
+    /// Called on every `save()`; whatever it returns lands in
+    /// `StoredSession.metadata`. The seam for a host's own per-session record —
+    /// a log of runs, a build status — that has to stay in step with the
+    /// transcript it describes.
+    public var sessionMetadata: (@MainActor @Sendable () -> [String: ChatValue])?
+    /// Called on `load(_:)` with whatever was persisted, or an empty dictionary
+    /// for a transcript saved before the host had any metadata to store.
+    public var onSessionMetadataLoaded: (@MainActor @Sendable ([String: ChatValue]) -> Void)?
+
     /// Called on the main actor when a run ends, however it ended. The hook for
     /// a notification, a sound, or a dock badge — none of which belong in here.
     public var onRunFinished: (@MainActor @Sendable (ChatRunOutcome) -> Void)?
@@ -82,6 +91,8 @@ public struct ChatSessionConfiguration: Sendable {
                 historyStore: ChatHistoryStore? = nil,
                 compressor: (any ContextCompressor)? = nil,
                 telemetry: (any ChatTelemetry)? = nil,
+                sessionMetadata: (@MainActor @Sendable () -> [String: ChatValue])? = nil,
+                onSessionMetadataLoaded: (@MainActor @Sendable ([String: ChatValue]) -> Void)? = nil,
                 onRunFinished: (@MainActor @Sendable (ChatRunOutcome) -> Void)? = nil) {
         self.backend = backend
         self.toolProviders = toolProviders
@@ -99,6 +110,8 @@ public struct ChatSessionConfiguration: Sendable {
         self.historyStore = historyStore
         self.compressor = compressor
         self.telemetry = telemetry
+        self.sessionMetadata = sessionMetadata
+        self.onSessionMetadataLoaded = onSessionMetadataLoaded
         self.onRunFinished = onRunFinished
     }
 }

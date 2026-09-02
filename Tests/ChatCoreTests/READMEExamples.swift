@@ -244,6 +244,21 @@ func readme_history(messages: [ChatMessage]) {
     _ = store.directory
 }
 
+// --- Host data alongside a transcript ---
+@MainActor
+func readme_sessionMetadata(backend: any ChatBackend, projectURL: URL) {
+    nonisolated(unsafe) var runs: [ChatValue] = []
+
+    let configuration = ChatSessionConfiguration(
+        backend: backend,
+        historyStore: ChatHistoryStore(directory: projectURL.appending(path: ".chat")),
+        sessionMetadata: { ["runs": .array(runs)] },
+        onSessionMetadataLoaded: { metadata in runs = metadata["runs"]?.arrayValue ?? [] })
+
+    let session = ChatSession(configuration: configuration)
+    _ = session.snapshot().metadata
+}
+
 // --- System prompt ---
 func readme_prompt() {
     var persona = ChatPersona.default

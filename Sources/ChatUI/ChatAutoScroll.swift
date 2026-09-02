@@ -72,6 +72,22 @@ public final class ChatAutoScrollController {
     /// reach its own end doesn't leave every later scroll unanimated.
     private var restoreTimeout: Task<Void, Never>?
 
+    /// True when the scroll view holds its own bottom edge through content changes —
+    /// `defaultScrollAnchor(.bottom, for: .sizeChanges)`, from iOS 18 / macOS 15. It is
+    /// the same systems that report scroll geometry, so one flag covers both.
+    private var anchorHoldsBottom: Bool { usesScrollGeometry }
+
+    /// Whether a follow has to move the transcript itself, or the scroll view already is.
+    ///
+    /// Scrolling on top of an anchor that is holding the bottom is a *second* correction
+    /// for one size change, and the two are visible as a bounce: at the end of a turn the
+    /// thinking indicator is removed, the anchor settles the shrink, and a `scrollTo`
+    /// immediately moves it again. So while the anchor is keeping up, following does
+    /// nothing; it steps in only once the transcript has actually drifted off the bottom.
+    var needsCorrection: Bool {
+        !anchorHoldsBottom || distanceFromBottom > Self.pinnedThreshold
+    }
+
     /// True when the reader has scrolled far enough up to warrant a "jump to bottom"
     /// affordance rather than silently dragging them along.
     public var isAwayFromBottom: Bool { !isFollowing && distanceFromBottom > Self.pinnedThreshold }
@@ -159,7 +175,10 @@ public final class ChatAutoScrollController {
     /// smooth. Animating each step is what causes the stutter.
     public func followStream(_ proxy: ScrollViewProxy, anchor: String) {
         guard isFollowing else { return }
+        // Recorded even when nothing is scrolled: it is what tells a discrete event
+        // landing in the next frame that a turn is in progress.
         lastStreamFollow = ContinuousClock.now
+        guard needsCorrection else { return }
         if distanceFromBottom > Self.animateAboveGap {
             withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(anchor, anchor: .bottom) }
         } else {
@@ -175,6 +194,7 @@ public final class ChatAutoScrollController {
     /// same frames as the streaming text, so they follow it unanimated instead.
     public func followEvent(_ proxy: ScrollViewProxy, anchor: String) {
         isFollowing = true
+        guard needsCorrection else { return }
         guard !isRestoring, !isStreamActive else {
             proxy.scrollTo(anchor, anchor: .bottom)
             return

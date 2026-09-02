@@ -188,13 +188,18 @@ public final class ChatSession {
         if let path = stored.workingDirectoryPath {
             workingDirectory = URL(fileURLWithPath: path)
         }
+        // Always called, even for a transcript that predates the host having
+        // any metadata: the host has to clear the last session's state either
+        // way, and only hearing about sessions that carry data wouldn't let it.
+        configuration.onSessionMetadataLoaded?(stored.metadata ?? [:])
         configuredFingerprint = nil
     }
 
-    @discardableResult
-    public func save() -> Bool {
-        guard let store = configuration.historyStore, !messages.isEmpty else { return false }
-        return store.save(StoredSession(
+    /// The session as it would be persisted. Exposed so a host that wants to
+    /// write the transcript through its own store, or add fields this type
+    /// doesn't have, can do so without reimplementing the mapping.
+    public func snapshot() -> StoredSession {
+        StoredSession(
             id: sessionID,
             title: title,
             createdAt: createdAt,
@@ -203,7 +208,14 @@ public final class ChatSession {
             usage: usage,
             workingDirectoryPath: workingDirectory?.path,
             workingDirectoryDisplayName: workingDirectory?.lastPathComponent,
-            modelName: nil))
+            modelName: nil,
+            metadata: configuration.sessionMetadata?())
+    }
+
+    @discardableResult
+    public func save() -> Bool {
+        guard let store = configuration.historyStore, !messages.isEmpty else { return false }
+        return store.save(snapshot())
     }
 
     /// Plan mode offers `exitPlanMode` and refuses mutating tools outright, so

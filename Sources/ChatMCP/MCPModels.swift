@@ -20,11 +20,99 @@ public enum MCPAuth: Codable, Equatable, Sendable {
 }
 
 /// Transport used to reach an MCP server.
-public enum MCPTransport: Codable, Equatable, Sendable {
+public enum MCPTransport: Equatable, Sendable {
     /// Remote Streamable-HTTP server.
     case http(url: URL, auth: MCPAuth)
     /// Local subprocess speaking MCP over stdio, e.g. `npx xcodebuildmcp@latest mcp`.
-    case stdio(command: String, arguments: [String])
+    ///
+    /// - Parameters:
+    ///   - environment: Merged *over* the inherited environment, so a caller
+    ///     can override `PATH` while everyone who passes nothing still gets the
+    ///     Homebrew and `nvm` augmentation.
+    ///   - workingDirectory: Overrides the session's working directory when
+    ///     set. A server checked out somewhere other than the user's project
+    ///     has to run from its own directory.
+    ///
+    /// Swift does not allow default values on an enum case's associated
+    /// values; the static overloads below stand in for them.
+    case stdio(command: String,
+               arguments: [String],
+               environment: [String: String],
+               workingDirectory: URL?)
+
+    public static func stdio(command: String, arguments: [String]) -> MCPTransport {
+        .stdio(command: command, arguments: arguments, environment: [:], workingDirectory: nil)
+    }
+
+    public static func stdio(command: String,
+                             arguments: [String],
+                             environment: [String: String]) -> MCPTransport {
+        .stdio(command: command, arguments: arguments,
+               environment: environment, workingDirectory: nil)
+    }
+
+    public static func stdio(command: String,
+                             arguments: [String],
+                             workingDirectory: URL?) -> MCPTransport {
+        .stdio(command: command, arguments: arguments,
+               environment: [:], workingDirectory: workingDirectory)
+    }
+}
+
+// MARK: - Transport persistence
+
+/// Hand-written rather than synthesized for two reasons: a payload written
+/// before `environment` and `workingDirectory` existed must still decode, and
+/// `environment` must never be written out at all.
+///
+/// The wire shape matches what the synthesized conformance produced, so
+/// existing stored server lists load unchanged.
+extension MCPTransport: Codable {
+
+    private enum CodingKeys: String, CodingKey { case http, stdio }
+    private enum HTTPKeys: String, CodingKey { case url, auth }
+    private enum StdioKeys: String, CodingKey {
+        case command, arguments, environment, workingDirectory
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        if container.contains(.http) {
+            let nested = try container.nestedContainer(keyedBy: HTTPKeys.self, forKey: .http)
+            self = .http(url: try nested.decode(URL.self, forKey: .url),
+                         auth: try nested.decode(MCPAuth.self, forKey: .auth))
+            return
+        }
+
+        let nested = try container.nestedContainer(keyedBy: StdioKeys.self, forKey: .stdio)
+        self = .stdio(
+            command: try nested.decode(String.self, forKey: .command),
+            arguments: try nested.decodeIfPresent([String].self, forKey: .arguments) ?? [],
+            environment: try nested.decodeIfPresent([String: String].self,
+                                                    forKey: .environment) ?? [:],
+            workingDirectory: try nested.decodeIfPresent(URL.self, forKey: .workingDirectory))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .http(let url, let auth):
+            var nested = container.nestedContainer(keyedBy: HTTPKeys.self, forKey: .http)
+            try nested.encode(url, forKey: .url)
+            try nested.encode(auth, forKey: .auth)
+
+        case .stdio(let command, let arguments, _, let workingDirectory):
+            var nested = container.nestedContainer(keyedBy: StdioKeys.self, forKey: .stdio)
+            try nested.encode(command, forKey: .command)
+            try nested.encode(arguments, forKey: .arguments)
+            // `environment` is deliberately dropped. It carries the API keys and
+            // credentials the server needs, and `MCPServerStore` writes this
+            // into `UserDefaults` — a plist on disk in the clear. The host
+            // re-supplies it through `seedServers` on every launch instead.
+            try nested.encodeIfPresent(workingDirectory, forKey: .workingDirectory)
+        }
+    }
 }
 
 /// A configured MCP server.
@@ -33,15 +121,28 @@ public struct MCPServerConfig: Identifiable, Codable, Equatable, Sendable {
     public var name: String
     public var transport: MCPTransport
     public var enabled: Bool
+    /// Overrides the manager's `requestTimeout` for this server's calls.
+    ///
+    /// Stored as seconds rather than a `Duration` so the persisted JSON stays
+    /// legible. One server running a half-hour job should not force every other
+    /// server's calls to hang for half an hour before they give up.
+    public var requestTimeoutSeconds: Double?
 
     public init(id: UUID = UUID(),
                 name: String,
                 transport: MCPTransport,
-                enabled: Bool = true) {
+                enabled: Bool = true,
+                requestTimeoutSeconds: Double? = nil) {
         self.id = id
         self.name = name
         self.transport = transport
         self.enabled = enabled
+        self.requestTimeoutSeconds = requestTimeoutSeconds
+    }
+
+    /// The override as a `Duration`, or nil to take the manager's default.
+    public var requestTimeout: Duration? {
+        requestTimeoutSeconds.map { .seconds($0) }
     }
 }
 
@@ -55,6 +156,7 @@ public enum MCPBridgeError: LocalizedError, Equatable {
     case authRequired(URL)
     case invalidResponse
     case timedOut(String)
+    case cancelled
     case serverError(code: Int, message: String)
 
     public var errorDescription: String? {
@@ -69,6 +171,8 @@ public enum MCPBridgeError: LocalizedError, Equatable {
             return "The MCP server returned an unexpected response."
         case .timedOut(let detail):
             return "Timed out. \(detail)"
+        case .cancelled:
+            return "The MCP tool call was cancelled."
         case .serverError(let code, let message):
             return "MCP server error \(code): \(message)"
         }
@@ -98,6 +202,32 @@ public struct MCPServerStatus: Identifiable, Equatable, Sendable {
         self.name = name
         self.state = state
         self.toolCount = toolCount
+    }
+}
+
+/// Progress reported by an in-flight MCP tool call, for the host to render.
+///
+/// A long tool otherwise gives the UI nothing to show for minutes at a stretch,
+/// which is indistinguishable from being wedged.
+public struct MCPToolProgress: Equatable, Sendable {
+    public let serverID: UUID
+    public let serverName: String
+    /// The name the model called, not the server's own name for the tool.
+    public let toolName: String
+    /// 0…1 when the server sent a total to measure against, nil otherwise.
+    public let fraction: Double?
+    public let message: String?
+
+    public init(serverID: UUID,
+                serverName: String,
+                toolName: String,
+                fraction: Double?,
+                message: String?) {
+        self.serverID = serverID
+        self.serverName = serverName
+        self.toolName = toolName
+        self.fraction = fraction
+        self.message = message
     }
 }
 

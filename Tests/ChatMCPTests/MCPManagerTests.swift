@@ -139,9 +139,15 @@ struct MCPManagerConnectionTests {
                                  onStatusChange: { snapshot in recorder.record(snapshot) })
         await manager.loadAndConnectEnabled()
 
-        // The callback hops to the main actor, so let it drain.
-        try? await Task.sleep(for: .milliseconds(100))
-        #expect(await recorder.sawConnected)
+        // The callback hops to the main actor, so let it drain. Polled rather
+        // than slept on a fixed deadline: under a loaded parallel test run the
+        // hop can take longer than any figure short enough to be worth waiting.
+        var drained = false
+        for _ in 0..<200 where !drained {
+            if await recorder.sawConnected { drained = true; break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(drained)
     }
 
     @Test("The tool list version changes when the connected set does")

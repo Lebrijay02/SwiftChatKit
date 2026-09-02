@@ -61,15 +61,16 @@ public enum StdioLauncher {
         "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"
     ]
 
-    /// Resolves an executable name to an absolute path.
-    public static func resolveExecutable(_ name: String) -> String? {
+    /// Resolves an executable name to an absolute path, searching `path` — or
+    /// the current process's `PATH` when none is given.
+    public static func resolveExecutable(_ name: String, in path: String? = nil) -> String? {
         if name.contains("/") {
             return FileManager.default.isExecutableFile(atPath: name) ? name : nil
         }
         var directories: [String] = []
         if let node = preferredNodeBinDirectory() { directories.append(node) }
         directories += fallbackBinDirectories
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
+        if let path = path ?? ProcessInfo.processInfo.environment["PATH"] {
             directories += path.split(separator: ":").map(String.init)
         }
         for directory in directories {
@@ -79,7 +80,13 @@ public enum StdioLauncher {
         return nil
     }
 
-    private static func augmentedEnvironment() -> [String: String] {
+    /// The parent environment with the usual bin directories prepended to
+    /// `PATH`, then `overrides` merged over the top — so a caller can replace
+    /// `PATH` outright, and one that passes nothing still gets the
+    /// augmentation.
+    private static func augmentedEnvironment(
+        overrides: [String: String] = [:]
+    ) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         var directories: [String] = []
         if let node = preferredNodeBinDirectory() { directories.append(node) }
@@ -90,7 +97,7 @@ public enum StdioLauncher {
         environment["PATH"] = (directories + existing)
             .filter { seen.insert($0).inserted }
             .joined(separator: ":")
-        return environment
+        return environment.merging(overrides) { _, override in override }
     }
 
     /// Newest nvm-installed Node on a major version the ecosystem still
@@ -129,13 +136,22 @@ public enum StdioLauncher {
 
     /// Launches `command arguments…` and returns the running process plus a
     /// transport bound to its stdio.
+    ///
+    /// `environment` is merged over the inherited environment, which is how a
+    /// host passes per-run secrets to one child without putting them in its own
+    /// process environment, where they would reach every other child and every
+    /// crash report.
     public static func launch(
         command: String,
         arguments: [String],
+        environment: [String: String] = [:],
         workingDirectory: URL? = nil
     ) throws -> (process: Process, transport: StdioTransport, stderr: OutputCollector) {
 
-        guard let executable = resolveExecutable(command) else {
+        // Resolved against the merged environment, so an overridden `PATH` also
+        // decides which executable this name refers to.
+        let merged = augmentedEnvironment(overrides: environment)
+        guard let executable = resolveExecutable(command, in: merged["PATH"]) else {
             throw LaunchError.executableNotFound(command)
         }
 
@@ -149,7 +165,7 @@ public enum StdioLauncher {
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errorPipe
-        process.environment = augmentedEnvironment()
+        process.environment = merged
         if let workingDirectory { process.currentDirectoryURL = workingDirectory }
 
         let stderr = OutputCollector()

@@ -36,18 +36,43 @@ public struct MCPServerStore: @unchecked Sendable {
     /// Returns the stored list, seeding it on first run and merging in any
     /// seed the host has added since — matched by id, so a seed the user
     /// disabled stays disabled rather than reappearing switched on.
+    ///
+    /// A stdio seed's `environment` is re-applied over what was stored, because
+    /// `MCPTransport` deliberately never persists it: it holds the credentials
+    /// the server needs, and this store writes to `UserDefaults`. The host
+    /// supplies them fresh on every launch and this is where they rejoin the
+    /// config the user has been editing.
     public func loadOrSeed(with seeds: [MCPServerConfig]) -> [MCPServerConfig] {
         var stored = load()
         guard !stored.isEmpty else {
             save(seeds)
             return seeds
         }
+        let seedsByID = Dictionary(seeds.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in stored.indices {
+            guard let seed = seedsByID[stored[index].id] else { continue }
+            stored[index].transport = Self.restoringEnvironment(
+                of: seed.transport, into: stored[index].transport)
+        }
+
         let existing = Set(stored.map(\.id))
         let missing = seeds.filter { !existing.contains($0.id) }
-        guard !missing.isEmpty else { return stored }
         stored.append(contentsOf: missing)
+        // Saving the merged list would write the seed environments straight
+        // back out — except `encode(to:)` drops them, which is the point.
         save(stored)
         return stored
+    }
+
+    /// Copies a seed's stdio environment onto the stored transport, leaving
+    /// everything else the user may have edited alone.
+    private static func restoringEnvironment(of seed: MCPTransport,
+                                             into stored: MCPTransport) -> MCPTransport {
+        guard case .stdio(_, _, let environment, _) = seed, !environment.isEmpty,
+              case .stdio(let command, let arguments, _, let directory) = stored
+        else { return stored }
+        return .stdio(command: command, arguments: arguments,
+                      environment: environment, workingDirectory: directory)
     }
 }
 
@@ -77,8 +102,17 @@ public extension MCPServerConfig {
 
             if let command = entry["command"] as? String {
                 let arguments = entry["args"] as? [String] ?? []
+                // `env` and `cwd` are part of the same de-facto format, and a
+                // server that needs them fails confusingly without them.
+                let environment = entry["env"] as? [String: String] ?? [:]
+                let directory = (entry["cwd"] as? String).map {
+                    URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true)
+                }
                 return MCPServerConfig(name: name,
-                                       transport: .stdio(command: command, arguments: arguments),
+                                       transport: .stdio(command: command,
+                                                         arguments: arguments,
+                                                         environment: environment,
+                                                         workingDirectory: directory),
                                        enabled: enabled)
             }
             if let urlString = entry["url"] as? String, let url = URL(string: urlString) {

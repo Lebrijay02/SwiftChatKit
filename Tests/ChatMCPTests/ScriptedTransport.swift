@@ -40,6 +40,15 @@ actor ScriptedTransport: Transport {
 
     private(set) var connectCount = 0
     private(set) var receivedCalls: [(name: String, arguments: Value)] = []
+    /// The `capabilities` object the client sent with `initialize`.
+    private(set) var declaredCapabilities: Value = .object([:])
+    /// Progress tokens the client attached, keyed by tool name.
+    private(set) var progressTokens: [String: Value] = [:]
+    /// Requests the client asked to be cancelled.
+    private(set) var cancelledRequests: [Int] = []
+    /// Replies to requests this transport initiated, keyed by their id.
+    private var inbound: [Int: CheckedContinuation<Value, Never>] = [:]
+    private var nextServerID = 10_000
     /// Set to fail the next `connect`, to exercise the reconnect path.
     var failConnect = false
 
@@ -57,6 +66,28 @@ actor ScriptedTransport: Transport {
 
     func setFailConnect(_ value: Bool) { failConnect = value }
 
+    /// Sends a server→client request and waits for the client's response
+    /// frame — the direction `elicitation/create` runs in.
+    func serverRequest(method: String, params: Value) async -> Value {
+        nextServerID += 1
+        let id = nextServerID
+        return await withCheckedContinuation { continuation in
+            inbound[id] = continuation
+            send(.object(["jsonrpc": .string("2.0"), "id": .int(id),
+                          "method": .string(method), "params": params]))
+        }
+    }
+
+    /// Reports progress against a token the client handed out.
+    func sendProgress(token: Value, progress: Double, total: Double?, message: String?) {
+        var params: [String: Value] = ["progressToken": token, "progress": .double(progress)]
+        if let total { params["total"] = .double(total) }
+        if let message { params["message"] = .string(message) }
+        send(.object(["jsonrpc": .string("2.0"),
+                      "method": .string("notifications/progress"),
+                      "params": .object(params)]))
+    }
+
     // MARK: - Transport
 
     func connect() async throws {
@@ -71,14 +102,33 @@ actor ScriptedTransport: Transport {
     func receive() -> AsyncThrowingStream<Data, Swift.Error> { stream }
 
     func send(_ data: Data) async throws {
-        guard case .object(let request)? = try? JSONDecoder().decode(Value.self, from: data),
-              case .string(let method)? = request["method"] else { return }
+        guard case .object(let request)? = try? JSONDecoder().decode(Value.self, from: data)
+        else { return }
+
+        // A frame with no method is the client answering something this
+        // transport asked it.
+        guard case .string(let method)? = request["method"] else {
+            if case .int(let id)? = request["id"] {
+                inbound.removeValue(forKey: id)?.resume(returning: .object(request))
+            }
+            return
+        }
+
+        if method == "notifications/cancelled",
+           case .object(let params)? = request["params"],
+           case .int(let requestID)? = params["requestId"] {
+            cancelledRequests.append(requestID)
+        }
 
         // Notifications carry no id and expect no reply.
         guard case .int(let id)? = request["id"] else { return }
 
         switch method {
         case "initialize":
+            if case .object(let params)? = request["params"],
+               let capabilities = params["capabilities"] {
+                declaredCapabilities = capabilities
+            }
             reply(id: id, result: .object(["protocolVersion": .string("2025-06-18")]))
 
         case "tools/list":
@@ -92,6 +142,9 @@ actor ScriptedTransport: Transport {
             guard case .object(let params)? = request["params"],
                   case .string(let name)? = params["name"] else { return }
             receivedCalls.append((name, params["arguments"] ?? .object([:])))
+            if case .object(let meta)? = params["_meta"], let token = meta["progressToken"] {
+                progressTokens[name] = token
+            }
 
             switch behaviours[name] ?? .text("ok") {
             case .text(let text):

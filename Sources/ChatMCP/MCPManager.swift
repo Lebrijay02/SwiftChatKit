@@ -31,10 +31,13 @@ public actor MCPManager: ToolProvider {
     private let store: MCPServerStore
     private let seeds: [MCPServerConfig]
     private let authorization: (any MCPAuthorizationProvider)?
+    private let elicitation: (any MCPElicitationHandler)?
     private let clientName: String
     private let connectTimeout: Duration
+    private let requestTimeout: Duration
     private let makeTransport: MCPTransportFactory?
     private var onStatusChange: (@MainActor @Sendable ([UUID: MCPServerStatus]) -> Void)?
+    private var onProgress: (@MainActor @Sendable (MCPToolProgress) -> Void)?
     /// Stdio servers are launched here, so they follow the session's directory.
     private var workingDirectory: URL?
 
@@ -70,17 +73,23 @@ public actor MCPManager: ToolProvider {
     public init(store: MCPServerStore = MCPServerStore(),
                 seedServers: [MCPServerConfig] = [],
                 authorization: (any MCPAuthorizationProvider)? = nil,
+                elicitation: (any MCPElicitationHandler)? = nil,
                 clientName: String = "SwiftChatKit",
                 connectTimeout: Duration = .seconds(150),
+                requestTimeout: Duration = .seconds(120),
                 transportFactory: MCPTransportFactory? = nil,
-                onStatusChange: (@MainActor @Sendable ([UUID: MCPServerStatus]) -> Void)? = nil) {
+                onStatusChange: (@MainActor @Sendable ([UUID: MCPServerStatus]) -> Void)? = nil,
+                onProgress: (@MainActor @Sendable (MCPToolProgress) -> Void)? = nil) {
         self.store = store
         self.seeds = seedServers
         self.authorization = authorization
+        self.elicitation = elicitation
         self.clientName = clientName
         self.connectTimeout = connectTimeout
+        self.requestTimeout = requestTimeout
         self.makeTransport = transportFactory
         self.onStatusChange = onStatusChange
+        self.onProgress = onProgress
     }
 
     /// Replaces the status observer after init, for hosts that build the
@@ -89,6 +98,13 @@ public actor MCPManager: ToolProvider {
         _ observer: (@MainActor @Sendable ([UUID: MCPServerStatus]) -> Void)?
     ) {
         onStatusChange = observer
+    }
+
+    /// Replaces the progress observer after init, for the same reason.
+    public func setProgressObserver(
+        _ observer: (@MainActor @Sendable (MCPToolProgress) -> Void)?
+    ) {
+        onProgress = observer
     }
 
     public func workingDirectoryChanged(to url: URL?) async {
@@ -171,11 +187,15 @@ public actor MCPManager: ToolProvider {
                 return request
             }))
 
-        case .stdio(let command, let arguments):
+        case .stdio(let command, let arguments, let environment, let directory):
             #if os(macOS)
-            let launched = try StdioLauncher.launch(command: command,
-                                                    arguments: arguments,
-                                                    workingDirectory: workingDirectory)
+            let launched = try StdioLauncher.launch(
+                command: command,
+                arguments: arguments,
+                environment: environment,
+                // A server checked out elsewhere runs from its own directory;
+                // only servers that don't say otherwise follow the session's.
+                workingDirectory: directory ?? workingDirectory)
             let pid = launched.process.processIdentifier
             return Connection(transport: launched.transport,
                               process: launched.process,
@@ -206,7 +226,11 @@ public actor MCPManager: ToolProvider {
             processes[config.id] = connection.process
             #endif
 
-            let client = MCPClient(transport: connection.transport, clientName: clientName)
+            let client = MCPClient(transport: connection.transport,
+                                   clientName: clientName,
+                                   requestTimeout: config.requestTimeout ?? requestTimeout,
+                                   elicitation: elicitation,
+                                   serverName: config.name)
             let tools = try await withTimeout(connectTimeout, onTimeout: connection.onTimeout) {
                 try await client.start()
                 return try await client.listTools()
@@ -383,10 +407,17 @@ public actor MCPManager: ToolProvider {
             return .failure(call, MCPBridgeError.unknownTool(call.name).localizedDescription)
         }
 
+        let progress = progressHandler(for: routed.server, toolName: call.name)
         do {
             guard let client = clients[routed.server] else { throw MCPBridgeError.notConnected }
-            let response = try await client.callTool(name: routed.original, arguments: call.arguments)
+            let response = try await client.callTool(name: routed.original,
+                                                     arguments: call.arguments,
+                                                     progress: progress)
             return Self.result(for: call, response)
+        } catch MCPBridgeError.cancelled {
+            // A cancelled call is the user's own doing. Reconnecting and
+            // running it again is the last thing they asked for.
+            return .failure(call, MCPBridgeError.cancelled.localizedDescription)
         } catch {
             // Stdio servers die quietly — a crashed child looks exactly like a
             // failed call until you try again. One reconnect, then give up.
@@ -398,11 +429,37 @@ public actor MCPManager: ToolProvider {
                 return .failure(call, error.localizedDescription)
             }
             do {
-                let response = try await client.callTool(name: retry.original, arguments: call.arguments)
+                let response = try await client.callTool(
+                    name: retry.original,
+                    arguments: call.arguments,
+                    progress: progressHandler(for: retry.server, toolName: call.name))
                 return Self.result(for: call, response)
             } catch {
                 return .failure(call, error.localizedDescription)
             }
+        }
+    }
+
+    /// Stops every in-flight call on every connected server, telling each one
+    /// to abandon the work rather than leaving it running unwatched.
+    public func cancelActiveCalls(reason: String = "Cancelled by the user.") async {
+        for client in clients.values {
+            await client.cancelActiveCalls(reason: reason)
+        }
+    }
+
+    /// Nil when no host is watching, which keeps the `_meta.progressToken` off
+    /// the wire — a server told to report progress nobody reads is doing work
+    /// for nothing.
+    private func progressHandler(for server: UUID,
+                                 toolName: String) -> MCPClient.ProgressHandler? {
+        guard let onProgress else { return nil }
+        let name = servers.first { $0.id == server }?.name ?? ""
+        return { fraction, message in
+            let update = MCPToolProgress(serverID: server, serverName: name,
+                                         toolName: toolName,
+                                         fraction: fraction, message: message)
+            Task { @MainActor in onProgress(update) }
         }
     }
 

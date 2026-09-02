@@ -119,6 +119,24 @@ struct ChatAutoScrollTests {
         #expect(!controller.isRestoring, "arrived, so the restore is over")
     }
 
+    @Test("A scroll view holding its own bottom is not scrolled on top of")
+    func anchoredGrowthNeedsNoScroll() {
+        let controller = ChatAutoScrollController()
+
+        // Before any scroll geometry arrives there is no bottom anchor to rely on, so
+        // following has to do the work itself.
+        #expect(controller.needsCorrection)
+
+        // Pinned, with the scroll view reporting: it is holding the bottom edge, and a
+        // second scroll for the same size change is the end-of-turn bounce.
+        controller.reportDistanceFromBottom(0)
+        #expect(!controller.needsCorrection)
+
+        // Drifted off the end — the anchor did not keep up, so following steps back in.
+        controller.reportDistanceFromBottom(300)
+        #expect(controller.needsCorrection)
+    }
+
     @Test("A scroll view reporting its own geometry supersedes the anchor's")
     func scrollGeometryWins() {
         let controller = ChatAutoScrollController()

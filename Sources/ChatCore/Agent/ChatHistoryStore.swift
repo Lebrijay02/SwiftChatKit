@@ -27,6 +27,13 @@ public struct StoredSession: Codable, Identifiable, Equatable, Sendable {
     public var workingDirectoryPath: String?
     public var workingDirectoryDisplayName: String?
     public var modelName: String?
+    /// Host-owned data persisted alongside the transcript. The package never
+    /// reads it — it exists so a host doesn't need a second file kept in sync
+    /// with this one, which is one crash away from disagreeing with it.
+    ///
+    /// Populated from `ChatSessionConfiguration.sessionMetadata` on save and
+    /// handed back through `onSessionMetadataLoaded` on load.
+    public var metadata: [String: ChatValue]?
 
     public init(id: UUID = UUID(),
                 title: String,
@@ -36,7 +43,8 @@ public struct StoredSession: Codable, Identifiable, Equatable, Sendable {
                 usage: TokenUsage? = nil,
                 workingDirectoryPath: String? = nil,
                 workingDirectoryDisplayName: String? = nil,
-                modelName: String? = nil) {
+                modelName: String? = nil,
+                metadata: [String: ChatValue]? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -46,6 +54,7 @@ public struct StoredSession: Codable, Identifiable, Equatable, Sendable {
         self.workingDirectoryPath = workingDirectoryPath
         self.workingDirectoryDisplayName = workingDirectoryDisplayName
         self.modelName = modelName
+        self.metadata = metadata
     }
 }
 
