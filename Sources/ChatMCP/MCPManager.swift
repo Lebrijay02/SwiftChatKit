@@ -296,6 +296,74 @@ public actor MCPManager: ToolProvider {
         }
     }
 
+    // MARK: - Recovery
+
+    /// Kills a server outright and reconnects it from scratch, as if it had
+    /// never been started.
+    ///
+    /// Distinct from `connect`, which reaches the same end state politely:
+    /// `disconnect` awaits `client.stop()` and sends SIGTERM, and neither
+    /// returns when the child is wedged — a stdio server that has stopped
+    /// reading its pipe leaves the stop request unanswered forever, so the
+    /// reconnect never begins. This one abandons the old client instead of
+    /// waiting on it and escalates to SIGKILL, which nothing can ignore.
+    ///
+    /// Does nothing for an unknown id: the caller is restarting a server it
+    /// believes exists, and silently connecting a new one would be a surprise.
+    public func forceRestart(_ id: UUID) async {
+        guard let config = servers.first(where: { $0.id == id }) else { return }
+
+        // Let the old client wind down on its own time. Awaiting it is exactly
+        // what hangs, and it owns nothing the new connection needs.
+        if let client = clients[id] {
+            clients[id] = nil
+            Task.detached { await client.stop() }
+        }
+
+        #if os(macOS)
+        if let process = processes[id], process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+        }
+        processes[id] = nil
+        #endif
+
+        serverTools[id] = nil
+        pendingSchemas[id] = nil
+        rebuildExposedNames()
+
+        await connect(config)
+    }
+
+    /// Suspends while a server is still handshaking, so a call that arrives
+    /// mid-startup waits for it instead of failing against a server that was
+    /// only moments from ready.
+    ///
+    /// - Returns: `true` once the server is connected; `false` if it settled
+    ///   into any other state, is unknown, or `timeout` elapsed first.
+    ///
+    /// Polls rather than parking a continuation on the status change: a
+    /// continuation has to be resumed on every path out of `connect`, and one
+    /// missed path wedges the caller permanently — the failure this method
+    /// exists to prevent. Each sleep releases the actor, so `connect` makes
+    /// progress in between.
+    public func waitUntilReady(_ id: UUID, timeout: Duration = .seconds(150)) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while true {
+            guard let state = statuses[id]?.state else { return false }
+            switch state {
+            case .connected: return true
+            case .connecting: break
+            default: return false
+            }
+            guard ContinuousClock.now < deadline else { return false }
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return false   // cancelled
+            }
+        }
+    }
+
     /// Races `operation` against a deadline, running `onTimeout` if it loses.
     private func withTimeout<T: Sendable>(
         _ timeout: Duration,

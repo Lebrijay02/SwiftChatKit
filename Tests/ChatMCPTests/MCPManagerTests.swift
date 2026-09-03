@@ -335,3 +335,97 @@ private final class StatusRecorder: @unchecked Sendable {
         snapshots.contains { $0.values.contains { $0.state == .connected } }
     }
 }
+
+@Suite("MCPManager — recovery")
+struct MCPManagerRecoveryTests {
+
+    @Test("Force restarting relaunches the server and rediscovers its tools")
+    func forceRestartReconnects() async {
+        let config = makeConfig("Files")
+        let registry = TransportRegistry()
+        await registry.register(config.id, tools: [.init("read"), .init("write")])
+
+        let manager = MCPManager(store: makeStore(), seedServers: [config],
+                                 transportFactory: await registry.factory)
+        await manager.loadAndConnectEnabled()
+        #expect(await registry.connectCount == 1)
+
+        await manager.forceRestart(config.id)
+
+        #expect(await registry.connectCount == 2)
+        #expect(await manager.statuses[config.id]?.state == .connected)
+        // The tools must come back under the same names: a restart that renamed
+        // them would strand whatever the model already knows about them.
+        #expect(await manager.declarations.map(\.name) == ["read", "write"])
+    }
+
+    @Test("Force restarting a server the manager doesn't know is a no-op")
+    func forceRestartUnknownServer() async {
+        let config = makeConfig("Files")
+        let registry = TransportRegistry()
+        await registry.register(config.id, tools: [.init("read")])
+
+        let manager = MCPManager(store: makeStore(), seedServers: [config],
+                                 transportFactory: await registry.factory)
+        await manager.loadAndConnectEnabled()
+
+        await manager.forceRestart(UUID())
+
+        #expect(await registry.connectCount == 1)
+        #expect(await manager.statuses[config.id]?.state == .connected)
+    }
+
+    @Test("A call arriving mid-handshake waits for the server instead of failing")
+    func waitUntilReadyWaitsOutTheHandshake() async throws {
+        let config = makeConfig("Slow")
+        let registry = TransportRegistry()
+        await registry.register(config.id, tools: [.init("read")])
+
+        let manager = MCPManager(
+            store: makeStore(), seedServers: [config],
+            transportFactory: { config, _ in
+                try await Task.sleep(for: .milliseconds(200))
+                return await registry.make(for: config)
+            })
+
+        let connecting = Task { await manager.loadAndConnectEnabled() }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await manager.statuses[config.id]?.state == .connecting)
+
+        #expect(await manager.waitUntilReady(config.id) == true)
+        await connecting.value
+    }
+
+    @Test("Waiting gives up at the deadline rather than blocking the turn forever")
+    func waitUntilReadyTimesOut() async throws {
+        let config = makeConfig("Wedged")
+        let manager = MCPManager(
+            store: makeStore(), seedServers: [config],
+            transportFactory: { _, _ in
+                try await Task.sleep(for: .seconds(30))
+                throw MCPBridgeError.notConnected
+            })
+
+        let connecting = Task { await manager.loadAndConnectEnabled() }
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(await manager.waitUntilReady(config.id, timeout: .milliseconds(200)) == false)
+        connecting.cancel()
+    }
+
+    @Test("Waiting on a server that failed to connect returns immediately")
+    func waitUntilReadyOnFailedServer() async {
+        let config = makeConfig("Bad")
+        let manager = MCPManager(store: makeStore(), seedServers: [config],
+                                 transportFactory: { _, _ in throw MCPBridgeError.notConnected })
+        await manager.loadAndConnectEnabled()
+
+        #expect(await manager.waitUntilReady(config.id) == false)
+    }
+
+    @Test("Waiting on an unknown server returns false rather than hanging")
+    func waitUntilReadyOnUnknownServer() async {
+        let manager = MCPManager(store: makeStore())
+        #expect(await manager.waitUntilReady(UUID()) == false)
+    }
+}
