@@ -604,15 +604,22 @@ public enum MarkdownAttributedBuilder {
                            font: mathFont(size: font.pointSize), color: color)
 
         case .code(let string):
-            // Hair spaces pad the background fill so it doesn't touch the glyphs.
-            return NSAttributedString(string: "\u{200A}\(string)\u{200A}", attributes: [
-                .font: PlatformFont.chatMono(size: font.pointSize * 0.92),
+            // Hair spaces keep the fill off the glyphs, but they are whitespace: at a
+            // wrap they land at the end of the previous line or the start of the next,
+            // and TextKit paints a whitespace run's background out to the container
+            // edge. That left a grey bar on the line above a span that wrapped. So the
+            // spaces stay for the gap and the fill goes on the code alone.
+            let codeFont = PlatformFont.chatMono(size: font.pointSize * 0.92)
+            let out = NSMutableAttributedString(string: "\u{200A}\(string)\u{200A}", attributes: [
+                .font: codeFont,
                 .foregroundColor: color,
-                // Not `codeBackground`: a code block is a panel the eye is meant to
-                // land on, whereas an inline span sits mid-sentence and only needs to
-                // be set apart from the prose around it.
-                .backgroundColor: PlatformColor.quaternaryLabelColor,
             ])
+            // Not `codeBackground`: a code block is a panel the eye is meant to land on,
+            // whereas an inline span sits mid-sentence and only needs to be set apart
+            // from the prose around it.
+            out.addAttribute(.backgroundColor, value: PlatformColor.quaternaryLabelColor,
+                             range: NSRange(location: 1, length: out.length - 2))
+            return out
 
         case .link(let children, let destination):
             let out = inlines(children, style: style, font: font, color: style.accentColor)

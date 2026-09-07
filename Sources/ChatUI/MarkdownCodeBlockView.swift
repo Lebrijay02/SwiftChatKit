@@ -33,6 +33,23 @@ public struct MarkdownCodeBlockView: View {
     /// Rendered height of one line, used to cap a collapsed block.
     @State private var lineHeight: CGFloat = 17
 
+    /// Gap between the code and the panel's top and bottom edges.
+    ///
+    /// One constant because four numbers had to agree: the text view's own
+    /// `textContainerInset`, and the doubled form of it in the panel's height and in the
+    /// text view's clamp. They were separately hardcoded to `8` and `16`, so the panel
+    /// held the code to the size the old inset implied and raising the padding around the
+    /// scroll view only grew the coloured box — the gap itself never moved.
+    static let verticalInset: CGFloat = 10
+
+    /// Gap between the panel and the prose above and below it.
+    ///
+    /// Deliberately more than ``MarkdownAttributedBuilder/blockSpacing``, which this used
+    /// to take: that number spaces blocks that share the message's background, where a
+    /// couple of points is enough to read as a break. A panel has its own fill and border,
+    /// so at the same 2pt it looked wedged between the surrounding paragraphs.
+    static let outerSpacing: CGFloat = 8
+
     public init(language: String?, code: String) {
         self.language = language
         self.code = code
@@ -53,7 +70,7 @@ public struct MarkdownCodeBlockView: View {
 
     /// Height the block occupies on screen. Also caps the text view itself, so a
     /// collapsed block has nothing hidden to scroll to.
-    private var frameHeight: CGFloat { max(visibleHeight, lineHeight) + 16 }
+    private var frameHeight: CGFloat { max(visibleHeight, lineHeight) + Self.verticalInset * 2 }
 
     private var fontSize: CGFloat { PlatformFont.chatBodySize * 0.95 }
 
@@ -83,10 +100,6 @@ public struct MarkdownCodeBlockView: View {
                     .allowsHitTesting(false)
                 }
             }
-            // Breathing room between the header rule and the first line, and between
-            // the last line and the panel's bottom edge. Outside the fade overlay, so
-            // that still meets the last visible line rather than the padding.
-            .padding(.vertical, 2)
         }
         .background(palette.codeBackground)
         // `CodeScrollView` is a native NSView/UIView, not a SwiftUI layer — without
@@ -95,7 +108,7 @@ public struct MarkdownCodeBlockView: View {
         .compositingGroup()
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.divider, lineWidth: 0.5))
-        .padding(.vertical, MarkdownAttributedBuilder.blockSpacing)
+        .padding(.vertical, Self.outerSpacing)
         // Sized from the text alone, tied only to what could actually change it —
         // never to the live view's own render cycle. `CodeScrollView` never wraps,
         // so a window resize changes its available width but never its content
@@ -324,7 +337,7 @@ extension CodeScrollView: NSViewRepresentable {
         textView.isVerticallyResizable = false
         textView.isHorizontallyResizable = true
         textView.autoresizingMask = []
-        textView.textContainerInset = NSSize(width: 12, height: 8)
+        textView.textContainerInset = NSSize(width: 12, height: MarkdownCodeBlockView.verticalInset)
 
         scrollView.documentView = textView
         return scrollView
@@ -342,8 +355,9 @@ extension CodeScrollView: NSViewRepresentable {
 
         let (size, _) = measure(layoutManager: layoutManager, container: container,
                                 paragraph: paragraph)
-        let height = min(size.height + 16, maxHeight)
-        textView.minSize = CGSize(width: size.width, height: max(height - 16, 0))
+        let inset = MarkdownCodeBlockView.verticalInset * 2
+        let height = min(size.height + inset, maxHeight)
+        textView.minSize = CGSize(width: size.width, height: max(height - inset, 0))
         textView.maxSize = CGSize(width: Self.unbounded.width, height: height)
         textView.frame = NSRect(origin: .zero,
                                 size: CGSize(width: size.width + 24, height: height))
@@ -378,7 +392,8 @@ extension CodeScrollView: UIViewRepresentable {
         textView.isSelectable = true
         textView.isScrollEnabled = false
         textView.backgroundColor = .clear
-        textView.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        let inset = MarkdownCodeBlockView.verticalInset
+        textView.textContainerInset = UIEdgeInsets(top: inset, left: 12, bottom: inset, right: 12)
 
         scrollView.addSubview(textView)
         return scrollView
@@ -404,7 +419,7 @@ extension CodeScrollView: UIViewRepresentable {
                                 paragraph: paragraph)
         let frame = CGRect(origin: .zero,
                            size: CGSize(width: size.width + 24,
-                                        height: min(size.height + 16, maxHeight)))
+                                        height: min(size.height + MarkdownCodeBlockView.verticalInset * 2, maxHeight)))
         textView.frame = frame
         scrollView.contentSize = frame.size
     }
