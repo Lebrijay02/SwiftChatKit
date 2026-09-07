@@ -45,6 +45,14 @@ enum MarkdownDecoration {
             fill(roundedRect: rect, radius: codeCornerRadius)
         }
 
+        if MarkdownAttributedBuilder.debugBlockBorders {
+            storage.enumerateAttribute(MarkdownAttributedBuilder.blockBoundaryAttribute, in: full) { value, range, _ in
+                guard value != nil else { return }
+                PlatformColor.systemBlue.setStroke()
+                stroke(roundedRect: box(range), radius: 0, lineWidth: 1)
+            }
+        }
+
         storage.enumerateAttribute(MarkdownAttributedBuilder.quoteDepthAttribute, in: full) { value, range, _ in
             guard let depth = value as? Int else { return }
             let rect = box(range)
@@ -58,7 +66,10 @@ enum MarkdownDecoration {
         storage.enumerateAttribute(MarkdownAttributedBuilder.thematicBreakAttribute, in: full) { value, range, _ in
             guard value != nil else { return }
             let rect = box(range)
-            style.dividerColor.setFill()
+            // The divider colour is tuned for hairlines between chrome and disappears
+            // against the message background; the rule reads as a break only in the
+            // secondary text colour.
+            style.secondaryColor.setFill()
             fill(rect: CGRect(x: rect.minX, y: rect.midY, width: container.size.width, height: 1))
         }
 

@@ -208,9 +208,20 @@ public enum MarkdownBlockParser {
         return nil
     }
 
+    /// Drops up to `upTo` leading spaces, never more than the line actually has — a line
+    /// indented less than its fence keeps whatever is left rather than losing content.
+    private static func stripIndent(_ line: String, upTo: Int) -> String {
+        guard upTo > 0 else { return line }
+        let removable = min(upTo, line.prefix(while: { $0 == " " }).count)
+        return String(line.dropFirst(removable))
+    }
+
     private static func parseFencedCode(_ lines: [String], from start: Int, fence: Fence) -> (MarkdownBlock, Int) {
         var code: [String] = []
         var i = start + 1
+        // A fence written inside a list item is indented, and so is its content; that
+        // indent belongs to the document, not to the code.
+        let indent = lines[start].prefix(while: { $0 == " " }).count
         while i < lines.count {
             let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
             let run = trimmed.prefix(while: { $0 == fence.marker }).count
@@ -218,7 +229,7 @@ public enum MarkdownBlockParser {
                 i += 1
                 break
             }
-            code.append(lines[i])
+            code.append(stripIndent(lines[i], upTo: indent))
             i += 1
         }
         // Trailing blank lines are fence padding, not content.
@@ -382,6 +393,13 @@ public enum MarkdownBlockParser {
                 if i + 1 < lines.count, listMarker(lines[i + 1]) != nil { i += 1; continue }
                 break
             }
+
+            // A fence ends the list rather than continuing an item, indented or not.
+            // Swallowed as continuation text it took the opening fence out of play, and
+            // the scanner then paired the *closing* fence with whatever came next — one
+            // code block running to the end of the message, with the real code rendered
+            // as prose above it.
+            if fenceInfo(trimmed) != nil { break }
 
             // Indented non-marker line: lazy continuation of the current item.
             if pendingScan != nil, line.hasPrefix("  ") || line.hasPrefix("\t") {

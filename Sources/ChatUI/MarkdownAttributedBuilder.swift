@@ -55,6 +55,16 @@ public enum MarkdownAttributedBuilder {
     /// that curve — this replaces it rather than layering on top of it.
     public static let tableHeaderAttribute = NSAttributedString.Key("SwiftChatKitMarkdownTableHeader")
 
+    /// Draws a blue box around every block the builder emits — one per heading,
+    /// paragraph, list, quote, table, rule and code block — so the gaps between them
+    /// can be seen rather than inferred. Debugging aid, off by default; the ranges are
+    /// only recorded while it is on, so leaving it off costs nothing.
+    nonisolated(unsafe) public static var debugBlockBorders = false
+
+    /// Marks one block's range for ``debugBlockBorders``. The value is the block's start
+    /// offset, which makes it unique per block.
+    public static let blockBoundaryAttribute = NSAttributedString.Key("SwiftChatKitMarkdownBlockBoundary")
+
     /// The gap between any two blocks — headings, prose, lists, quotes, rules, code.
     /// One number on purpose: individual blocks no longer choose their own spacing,
     /// so widening one is a deliberate exception rather than the default.
@@ -79,9 +89,11 @@ public enum MarkdownAttributedBuilder {
         var regions: [MarkdownCodeRegion] = []
 
         for block in blocks {
-            // Every block leaves the string non-empty, so this is the same test as
-            // "not the first block" was when this only ever started from nothing.
-            if result.length > 0 { appendSeparator(to: result) }
+            // No separator between blocks: each one is already terminated by the newline
+            // `append(_:to:)` adds, which is all a paragraph break needs. A second
+            // newline here made an empty paragraph between every pair of blocks, laid
+            // out as a full blank line — the large gaps under headings and rules.
+            let blockStart = result.length
             switch block {
             case .heading(let level, let content, _):
                 append(heading(level: level, content: content, style: style), to: result)
@@ -120,6 +132,15 @@ public enum MarkdownAttributedBuilder {
             case .footnoteDefinition(let label, let content):
                 append(footnote(label: label, content: content, style: style), to: result)
             }
+
+            if debugBlockBorders, result.length > blockStart {
+                // The start offset doubles as the value: `enumerateAttribute` coalesces
+                // adjacent equal values, and two blocks sharing one box would defeat the
+                // point of drawing them.
+                result.addAttribute(blockBoundaryAttribute, value: blockStart,
+                                    range: NSRange(location: blockStart,
+                                                   length: result.length - blockStart))
+            }
         }
 
         return regions
@@ -157,9 +178,23 @@ public enum MarkdownAttributedBuilder {
         text.addAttribute(.paragraphStyle, value: trimmed, range: lastRange)
     }
 
+    /// Appends a block and the newline that ends its last paragraph, so the next block
+    /// starts its own. That newline is the *only* character between two blocks: an extra
+    /// separator on top of it would be an empty paragraph, laid out as a full blank line.
     private static func append(_ piece: NSAttributedString, to target: NSMutableAttributedString) {
         target.append(piece)
-        if !piece.string.hasSuffix("\n") { target.append(NSAttributedString(string: "\n")) }
+        guard !piece.string.hasSuffix("\n"), piece.length > 0 else { return }
+        // The terminator belongs to the paragraph it closes, so it carries that
+        // paragraph's attributes; left plain it would be laid out at the default 12pt.
+        var attributes = piece.attributes(at: piece.length - 1, effectiveRange: nil)
+        // The decorations are drawn from their attribute's range; carrying them onto the
+        // terminator would grow the panel, quote bar or rule by an empty trailing line.
+        attributes[codeBlockAttribute] = nil
+        attributes[quoteDepthAttribute] = nil
+        attributes[thematicBreakAttribute] = nil
+        attributes[tableAttribute] = nil
+        attributes[tableHeaderAttribute] = nil
+        target.append(NSAttributedString(string: "\n", attributes: attributes))
     }
 
     // MARK: - Blocks
@@ -215,27 +250,6 @@ public enum MarkdownAttributedBuilder {
 
     /// A code block taller than this collapses to a preview until expanded.
     public static let collapsedCodeLines = 6
-
-    /// The newline between blocks inherits the preceding run's attributes; left plain it
-    /// picks up the default 12pt font and adds a visible gap of its own.
-    private static func appendSeparator(to text: NSMutableAttributedString) {
-        var attributes: [NSAttributedString.Key: Any] = [:]
-        if text.length > 0 {
-            attributes = text.attributes(at: text.length - 1, effectiveRange: nil)
-            // Carried onto the next block these would extend its panel or quote bar.
-            attributes[codeBlockAttribute] = nil
-            attributes[quoteDepthAttribute] = nil
-            attributes[thematicBreakAttribute] = nil
-            attributes[tableAttribute] = nil
-            attributes[tableHeaderAttribute] = nil
-            // A code block's or table's paragraph style carries indents, spacing, and —
-            // for tables — an NSTextTableBlock with its own border and padding. Left in
-            // place, the separator becomes one more (empty) cell or code line, padding
-            // out whatever follows it. Only the font/color need to survive.
-            attributes[.paragraphStyle] = nil
-        }
-        text.append(NSAttributedString(string: "\n", attributes: attributes))
-    }
 
     private static func codeBlock(_ code: String, style: MarkdownStyle) -> NSAttributedString {
         let font = PlatformFont.chatMono(size: style.bodyFontSize * 0.95)
@@ -353,8 +367,8 @@ public enum MarkdownAttributedBuilder {
 
     private static func thematicBreak(style: MarkdownStyle) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacingBefore = 2
-        paragraph.paragraphSpacing = 2
+        paragraph.paragraphSpacingBefore = blockSpacing + 1
+        paragraph.paragraphSpacing = blockSpacing + 1
         // The carrier line is collapsed to a hairline; without a line-height clamp it
         // reserves a full line box and the rule floats in a band of empty space.
         paragraph.minimumLineHeight = 7
@@ -594,7 +608,10 @@ public enum MarkdownAttributedBuilder {
             return NSAttributedString(string: "\u{200A}\(string)\u{200A}", attributes: [
                 .font: PlatformFont.chatMono(size: font.pointSize * 0.92),
                 .foregroundColor: color,
-                .backgroundColor: style.codeBackground,
+                // Not `codeBackground`: a code block is a panel the eye is meant to
+                // land on, whereas an inline span sits mid-sentence and only needs to
+                // be set apart from the prose around it.
+                .backgroundColor: PlatformColor.quaternaryLabelColor,
             ])
 
         case .link(let children, let destination):

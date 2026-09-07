@@ -83,6 +83,10 @@ public struct MarkdownCodeBlockView: View {
                     .allowsHitTesting(false)
                 }
             }
+            // Breathing room between the header rule and the first line, and between
+            // the last line and the panel's bottom edge. Outside the fade overlay, so
+            // that still meets the last visible line rather than the padding.
+            .padding(.vertical, 2)
         }
         .background(palette.codeBackground)
         // `CodeScrollView` is a native NSView/UIView, not a SwiftUI layer — without
