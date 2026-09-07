@@ -91,7 +91,7 @@ public struct MarkdownCodeBlockView: View {
         .compositingGroup()
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.divider, lineWidth: 0.5))
-        .padding(.vertical, 4)
+        .padding(.vertical, MarkdownAttributedBuilder.blockSpacing)
         // Sized from the text alone, tied only to what could actually change it —
         // never to the live view's own render cycle. `CodeScrollView` never wraps,
         // so a window resize changes its available width but never its content

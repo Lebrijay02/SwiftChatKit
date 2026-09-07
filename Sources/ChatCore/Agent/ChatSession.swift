@@ -641,6 +641,18 @@ public final class ChatSession {
                               turns: turn,
                               started: started)
 
+        // After the answer is delivered, never before. Compacting on the way in
+        // would fold the message the user just typed into the summary and then
+        // answer it out of a transcript they can no longer see. Doing it here
+        // means the next turn starts from a small history instead.
+        //
+        // Ahead of `onRunFinished` so that by the time a host is told the run
+        // ended, the transcript it is about to read has stopped moving.
+        if outcome == .completed,
+           configuration.context.shouldCompact(afterPromptTokens: lastTurnUsage.prompt) {
+            await compact()
+        }
+
         configuration.onRunFinished?(outcome)
     }
 
@@ -733,6 +745,12 @@ public final class ChatSession {
         if let compressor = configuration.compressor {
             final = await compress(final, using: compressor)
         }
+
+        // After the compressor, not before: it stores the full text and hands
+        // back a short handle, so anything still oversized here is text nobody
+        // is keeping. Truncating first would shrink what the compressor could
+        // have preserved in full.
+        final = final.map(configuration.context.truncating)
 
         for (index, result) in final.enumerated() {
             complete(messageIDs[index], failed: result.errorMessage != nil)

@@ -93,7 +93,7 @@ public enum MarkdownSegment: Identifiable {
         func flushProse(upTo end: Int) {
             guard end > pendingStart else { return }
             let run = Array(blocks[pendingStart..<end])
-            let rendered: NSAttributedString
+            let rendered: NSMutableAttributedString
 
             if let cached = previous?.proseTail,
                previous?.styleKey == styleKey,
@@ -112,7 +112,8 @@ public enum MarkdownSegment: Identifiable {
                 MarkdownAttributedBuilder.append(Array(blocks[stableEnd..<end]), to: full, style: style)
                 rendered = full
             } else {
-                rendered = MarkdownAttributedBuilder.build(run, style: style).attributed
+                rendered = NSMutableAttributedString()
+                MarkdownAttributedBuilder.append(run, to: rendered, style: style)
                 // Seed the cache for the next delta, covering the stable part of this run.
                 let stableEnd = min(reusable, end)
                 if stableEnd > pendingStart {
@@ -127,6 +128,9 @@ public enum MarkdownSegment: Identifiable {
                 }
             }
 
+            // Only ever the finished copy — the cached prefix keeps its terminator and
+            // spacing, since the next delta appends after it and both become real again.
+            MarkdownAttributedBuilder.trimTrailingGap(in: rendered)
             segments.append(.prose(id: segments.count, attributed: rendered))
             ranges.append(pendingStart..<end)
         }

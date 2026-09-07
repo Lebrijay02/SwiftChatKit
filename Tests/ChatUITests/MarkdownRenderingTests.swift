@@ -135,6 +135,46 @@ struct MarkdownSegmentTests {
         }
     }
 
+    /// A block terminator is a newline, and TextKit gives a trailing newline an empty
+    /// final line fragment that `usedRect` measures. Left on, the last block of every
+    /// run costs a full extra line of blank height under the message.
+    @Test("A finished run does not end on the terminator that would add a blank line")
+    func trimsTrailingNewline() {
+        for markdown in ["Body", "# Title\n\nBody", "- one\n- two", "before\n\n```\ncode\n```\n\nafter"] {
+            let segments = MarkdownSegment.split(MarkdownBlockParser.parse(markdown), style: style)
+            for case .prose(_, let attributed) in segments {
+                #expect(!attributed.string.hasSuffix("\n"), "trailing newline left on: \(markdown)")
+            }
+        }
+    }
+
+    /// The trim runs on the finished copy only. Were it applied to the cached prefix the
+    /// incremental path extends, the next delta would append onto a run whose last block
+    /// had lost its terminator — fusing two blocks into one paragraph.
+    @Test("Trimming does not change what a streaming message ends up rendering")
+    func trimSurvivesIncrementalRender() {
+        let full = "# Title\n\nFirst paragraph.\n\nSecond paragraph."
+        let cold = MarkdownSegment.split(MarkdownBlockParser.parse(full), style: style)
+
+        var document: MarkdownDocument?
+        var set: MarkdownSegmentSet?
+        for end in stride(from: 4, through: full.count, by: 7) {
+            let prefix = String(full.prefix(end))
+            let parsed = MarkdownBlockParser.parse(prefix, reusing: document)
+            set = MarkdownSegment.split(parsed, style: style, reusing: set)
+            document = parsed
+        }
+        let parsed = MarkdownBlockParser.parse(full, reusing: document)
+        let streamed = MarkdownSegment.split(parsed, style: style, reusing: set)
+
+        #expect(streamed.segments.count == cold.count)
+        for (a, b) in zip(streamed.segments, cold) {
+            if case .prose(_, let x) = a, case .prose(_, let y) = b {
+                #expect(x.string == y.string)
+            }
+        }
+    }
+
     @Test("Segment ids are distinct so ForEach does not reuse views")
     func distinctIDs() {
         let segments = MarkdownSegment.split(

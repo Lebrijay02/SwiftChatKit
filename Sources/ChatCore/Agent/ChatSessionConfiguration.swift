@@ -42,6 +42,11 @@ public struct ChatSessionConfiguration: Sendable {
     /// that never registers one gets a chat where `/` is an ordinary character.
     public var slashCommands: SlashCommandsConfiguration
 
+    /// Limits that keep a long session inside the model's context window.
+    /// `.unbounded` by default; see `ContextPolicy` for why a host has to state
+    /// the window size itself.
+    public var context: ContextPolicy
+
     // MARK: Behavior
 
     /// Hard cap on tool round-trips in a single run. Reaching it appends a note
@@ -88,6 +93,7 @@ public struct ChatSessionConfiguration: Sendable {
                 workingDirectory: URL? = nil,
                 skills: SkillsConfiguration = .disabled,
                 slashCommands: SlashCommandsConfiguration = .disabled,
+                context: ContextPolicy = .unbounded,
                 maxTurns: Int = 100,
                 enableTodos: Bool = false,
                 enableQuestions: Bool = false,
@@ -108,6 +114,7 @@ public struct ChatSessionConfiguration: Sendable {
         self.workingDirectory = workingDirectory
         self.skills = skills
         self.slashCommands = slashCommands
+        self.context = context
         self.maxTurns = maxTurns
         self.enableTodos = enableTodos
         self.enableQuestions = enableQuestions

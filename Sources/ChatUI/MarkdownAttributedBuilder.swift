@@ -55,6 +55,11 @@ public enum MarkdownAttributedBuilder {
     /// that curve — this replaces it rather than layering on top of it.
     public static let tableHeaderAttribute = NSAttributedString.Key("SwiftChatKitMarkdownTableHeader")
 
+    /// The gap between any two blocks — headings, prose, lists, quotes, rules, code.
+    /// One number on purpose: individual blocks no longer choose their own spacing,
+    /// so widening one is a deliberate exception rather than the default.
+    public static let blockSpacing: CGFloat = 2
+
     public static func build(_ blocks: [MarkdownBlock], style: MarkdownStyle) -> MarkdownRenderResult {
         let result = NSMutableAttributedString()
         let regions = append(blocks, to: result, style: style)
@@ -120,6 +125,38 @@ public enum MarkdownAttributedBuilder {
         return regions
     }
 
+    /// Closes the blank strip a finished run reserves below its last line, which reads
+    /// as a gap between messages rather than as part of the text. Two separate causes:
+    ///
+    /// - Every block is terminated with a newline so the next one starts its own
+    ///   paragraph, and TextKit lays out an empty final line fragment for a trailing
+    ///   newline. `usedRect` counts that fragment, so the last block of a run costs a
+    ///   full extra line of height — by far the larger of the two.
+    /// - `paragraphSpacing` on the last paragraph, which `usedRect` also counts.
+    ///
+    /// Applied to a finished segment rather than inside ``append(_:to:style:)``, so a
+    /// streaming message can still extend text it has already rendered: both the
+    /// newline and the gap after a block are only wrong while that block is the last one.
+    public static func trimTrailingGap(in text: NSMutableAttributedString) {
+        guard text.length > 0 else { return }
+
+        // One newline only — the terminator `append(_:to:)` adds. Anything beyond it is
+        // blank space the message itself asked for.
+        if (text.string as NSString).character(at: text.length - 1) == 0x0A {
+            text.deleteCharacters(in: NSRange(location: text.length - 1, length: 1))
+        }
+        guard text.length > 0 else { return }
+
+        let lastRange = (text.string as NSString).lineRange(for: NSRange(location: text.length - 1, length: 0))
+        var effective = NSRange()
+        guard let current = text.attribute(.paragraphStyle, at: lastRange.location,
+                                           effectiveRange: &effective) as? NSParagraphStyle,
+              let trimmed = current.mutableCopy() as? NSMutableParagraphStyle
+        else { return }
+        trimmed.paragraphSpacing = 0
+        text.addAttribute(.paragraphStyle, value: trimmed, range: lastRange)
+    }
+
     private static func append(_ piece: NSAttributedString, to target: NSMutableAttributedString) {
         target.append(piece)
         if !piece.string.hasSuffix("\n") { target.append(NSAttributedString(string: "\n")) }
@@ -133,8 +170,8 @@ public enum MarkdownAttributedBuilder {
         let base = PlatformFont.chatSystem(size: size, weight: .bold)
 
         let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacingBefore = level <= 2 ? size * 0.5 : size * 0.4
-        paragraph.paragraphSpacing = size * 0.15
+        paragraph.paragraphSpacingBefore = blockSpacing
+        paragraph.paragraphSpacing = blockSpacing
         paragraph.lineHeightMultiple = 1.05
 
         let out = inlines(content, style: style, font: base, color: style.textColor)
@@ -153,7 +190,7 @@ public enum MarkdownAttributedBuilder {
     private static func bodyParagraphStyle(_ style: MarkdownStyle) -> NSParagraphStyle {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 3
-        paragraph.paragraphSpacing = style.bodyFontSize * 0.3
+        paragraph.paragraphSpacing = blockSpacing
         return paragraph
     }
 
@@ -164,7 +201,7 @@ public enum MarkdownAttributedBuilder {
         let indent = CGFloat(depth) * 18
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 3
-        paragraph.paragraphSpacing = style.bodyFontSize * 0.3
+        paragraph.paragraphSpacing = blockSpacing
         paragraph.firstLineHeadIndent = indent
         paragraph.headIndent = indent
         // The bar itself is drawn by the text view; the indent reserves room for it.
@@ -221,7 +258,7 @@ public enum MarkdownAttributedBuilder {
         // Every newline inside the code is a paragraph break, so block spacing has to be
         // applied to the first and last lines only — putting it on `paragraph` would
         // insert the gap between every single line of code.
-        applyOuterSpacing(before: 10, after: 10, to: out, base: paragraph)
+        applyOuterSpacing(before: blockSpacing, after: blockSpacing, to: out, base: paragraph)
         return out
     }
 
@@ -267,7 +304,7 @@ public enum MarkdownAttributedBuilder {
 
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 3
-            paragraph.paragraphSpacing = style.bodyFontSize * 0.2
+            paragraph.paragraphSpacing = blockSpacing
             paragraph.firstLineHeadIndent = indent
             // Wrapped lines align with the text, not the marker.
             paragraph.headIndent = indent + 20
@@ -297,8 +334,8 @@ public enum MarkdownAttributedBuilder {
     private static func mathBlock(_ content: [MarkdownInline], style: MarkdownStyle) -> NSAttributedString {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
-        paragraph.paragraphSpacingBefore = style.bodyFontSize * 0.5
-        paragraph.paragraphSpacing = style.bodyFontSize * 0.5
+        paragraph.paragraphSpacingBefore = blockSpacing
+        paragraph.paragraphSpacing = blockSpacing
         paragraph.lineSpacing = 3
 
         let out = inlines(content, style: style,
@@ -351,7 +388,7 @@ public enum MarkdownAttributedBuilder {
                 paragraph.lineSpacing = 3
                 paragraph.firstLineHeadIndent = 18
                 paragraph.headIndent = 18
-                paragraph.paragraphSpacing = style.bodyFontSize * 0.3
+                paragraph.paragraphSpacing = blockSpacing
                 let body = inlines(detail, style: style, font: font, color: style.secondaryColor)
                 body.addAttribute(.paragraphStyle, value: paragraph,
                                   range: NSRange(location: 0, length: body.length))
@@ -367,7 +404,7 @@ public enum MarkdownAttributedBuilder {
         paragraph.lineSpacing = 2
         paragraph.firstLineHeadIndent = 0
         paragraph.headIndent = 18
-        paragraph.paragraphSpacing = style.bodyFontSize * 0.3
+        paragraph.paragraphSpacing = blockSpacing
 
         let out = NSMutableAttributedString(string: "\(label). ", attributes: [
             .font: PlatformFont.chatSystem(size: style.bodyFontSize * 0.9, weight: .semibold),
