@@ -83,6 +83,9 @@ public struct StoredMessage: Codable, Equatable, Sendable {
     public var rawResult: [String: ChatValue]?
     /// Filenames of dropped attachments, kept so the UI can show what was sent.
     public var attachmentNames: [String]?
+    /// Display-only feedback. Optional so transcripts written before local notes
+    /// existed decode as ordinary assistant turns, which is what they were.
+    public var isLocalNote: Bool?
 
     public init(from message: ChatMessage) {
         switch message.role {
@@ -100,6 +103,7 @@ public struct StoredMessage: Codable, Equatable, Sendable {
         rawArguments = message.rawArguments
         rawResult = message.rawResult
         attachmentNames = message.attachments?.compactMap(\.filename)
+        isLocalNote = message.isLocalNote ? true : nil
     }
 
     public func toChatMessage() -> ChatMessage {
@@ -118,7 +122,8 @@ public struct StoredMessage: Codable, Equatable, Sendable {
                            status: status,
                            callID: callID,
                            rawArguments: rawArguments,
-                           rawResult: rawResult)
+                           rawResult: rawResult,
+                           isLocalNote: isLocalNote ?? false)
     }
 
     /// Whether this message carries a replayable tool payload. A `.toolCall`

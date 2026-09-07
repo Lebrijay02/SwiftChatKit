@@ -116,6 +116,7 @@ private struct Elicitation: MCPElicitationHandler {
 /// satisfies `ChatConfiguration`.
 private final class NullBackend: ChatBackend {
     func configure(systemInstruction: String, tools: [ToolDeclaration], history: [ChatTurn]) async {}
+    func generate(_ prompt: String) async throws -> String { "" }
     var history: [ChatTurn] { get async { [] } }
     var modelName: String { get async { "null" } }
     func stream(_ input: TurnInput) -> AsyncThrowingStream<TurnChunk, Error> {

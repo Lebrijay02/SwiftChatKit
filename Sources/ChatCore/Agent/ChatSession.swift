@@ -21,7 +21,10 @@ public final class ChatSession {
     // MARK: - Observable state
 
     /// The visible transcript, including tool calls and their results.
-    public private(set) var messages: [ChatMessage] = []
+    ///
+    /// Settable within the module so tests can seed a conversation directly;
+    /// read-only to a host, which changes it by sending.
+    public internal(set) var messages: [ChatMessage] = []
 
     /// True from `send` until the run ends, including while a permission card
     /// or question is parked waiting on the user.
@@ -86,6 +89,11 @@ public final class ChatSession {
     private var configuredFingerprint: String?
     private let createdAt = Date()
 
+    /// Turns replayed ahead of the transcript. Compaction puts the summary here
+    /// rather than in `messages`, so the model keeps the thread while the user
+    /// sees one tidy note instead of the conversation it replaced.
+    private var historyPrefix: [ChatTurn] = []
+
     // MARK: - Init
 
     public init(configuration: ChatSessionConfiguration) {
@@ -120,13 +128,22 @@ public final class ChatSession {
 
     // MARK: - Sending
 
-    /// Starts a run. Ignored while one is in flight — a second concurrent run
-    /// would interleave two conversations into one history.
+    /// Starts a run, or answers a slash command without involving the model.
+    ///
+    /// Ignored while a run is in flight — a second concurrent run would
+    /// interleave two conversations into one history. Commands are the
+    /// exception: `/clear` and `/compact` exist partly to interrupt.
     public func send(_ text: String, attachments: [Attachment]? = nil) {
-        guard !isStreaming else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !(attachments ?? []).isEmpty else { return }
 
+        if configuration.slashCommands.isEnabled,
+           let parsed = SlashCommandParser.parse(trimmed) {
+            dispatch(name: parsed.name, arguments: parsed.arguments, rawInput: trimmed)
+            return
+        }
+
+        guard !isStreaming else { return }
         messages.append(.user(text, attachments: attachments))
         if title == "New chat" {
             title = ChatHistoryStore.derivedTitle(from: messages)
@@ -160,6 +177,235 @@ public final class ChatSession {
         }
     }
 
+    // MARK: - Slash commands
+
+    /// Every command currently available, built-ins and host-registered alike,
+    /// with skills last. Exposed for autocomplete — a host shouldn't have to
+    /// keep its own copy of this list in step with the configuration.
+    public var availableCommands: [SlashCommand] {
+        let configured = configuration.slashCommands
+        var commands = configured.custom
+        let taken = Set(commands.map { $0.name.lowercased() })
+
+        for builtIn in SlashCommandsConfiguration.BuiltIn.allCases
+        where configured.builtIns.contains(builtIn) && !taken.contains(builtIn.rawValue) {
+            commands.append(SlashCommand(name: builtIn.rawValue,
+                                         summary: builtIn.summary) { _ in .none })
+        }
+
+        if configured.skillsAsCommands {
+            for skill in skills.skills where !taken.contains(skill.name.lowercased()) {
+                commands.append(SlashCommand(name: skill.name, summary: skill.description) { _ in .none })
+            }
+        }
+        return commands
+    }
+
+    private func dispatch(name: String, arguments: String, rawInput: String) {
+        let configured = configuration.slashCommands
+        let key = name.lowercased()
+        let context = SlashCommandContext(arguments: arguments,
+                                          rawInput: rawInput,
+                                          workingDirectory: workingDirectory,
+                                          planMode: planMode)
+
+        // Host commands first, so registering a name replaces the built-in
+        // rather than requiring it to be disabled separately.
+        if let custom = configured.custom.first(where: { $0.name.lowercased() == key }) {
+            perform(custom.handler(context), rawInput: rawInput)
+            return
+        }
+
+        if let builtIn = SlashCommandsConfiguration.BuiltIn(rawValue: key),
+           configured.builtIns.contains(builtIn) {
+            perform(action(for: builtIn, context: context), rawInput: rawInput)
+            return
+        }
+
+        if configured.skillsAsCommands {
+            // Rescan first: a skill added since launch should be callable
+            // without restarting the app.
+            skills.refresh(workingDirectory: workingDirectory)
+            if let skill = skills.skill(named: name) {
+                perform(skillAction(skill, arguments: arguments), rawInput: rawInput)
+                return
+            }
+        }
+
+        let known = availableCommands.map { "`/\($0.name)`" }
+        messages.append(.note(known.isEmpty
+            ? "Unknown command `/\(name)`."
+            : "Unknown command `/\(name)`. Available: \(known.joined(separator: ", "))"))
+    }
+
+    private func action(for builtIn: SlashCommandsConfiguration.BuiltIn,
+                        context: SlashCommandContext) -> SlashCommandAction {
+        switch builtIn {
+        case .clear:   return .clear
+        case .compact: return .compact
+        case .newChat: return .newChat
+        case .plan:    return .togglePlanMode
+        case .help:
+            let lines = availableCommands
+                .map { "- `/\($0.name)` — \($0.summary)" }
+                .joined(separator: "\n")
+            return .note(lines.isEmpty ? "No commands are available." : "**Commands**\n\n\(lines)")
+        }
+    }
+
+    /// Turns `/skill-name args` into a run carrying the skill's instructions.
+    /// The body is loaded eagerly here — unlike the `useSkill` tool, the user
+    /// has already committed to running this one, so there is nothing to defer.
+    private func skillAction(_ skill: AgentSkill, arguments: String) -> SlashCommandAction {
+        let body: String
+        do {
+            body = try skills.skillBody(skill)
+        } catch {
+            return .note("Couldn't read skill `\(skill.name)`: \(error.localizedDescription)")
+        }
+
+        var prompt = """
+        The user invoked the skill "/\(skill.name)". Follow these skill instructions to complete \
+        the request. The skill's support files live at \(skill.directory.path) — read any file it \
+        references relative to that directory.
+
+        --- SKILL INSTRUCTIONS ---
+        \(body)
+        --- END SKILL INSTRUCTIONS ---
+        """
+        if !arguments.isEmpty {
+            prompt += "\n\nThe user's arguments to the skill: \(arguments)"
+        }
+        return .prompt(prompt)
+    }
+
+    private func perform(_ action: SlashCommandAction, rawInput: String) {
+        switch action {
+        case .none:
+            break
+
+        case .note(let text):
+            messages.append(.note(text))
+
+        case .prompt(let text):
+            guard !isStreaming else { return }
+            // The transcript shows what was typed; the model gets the expansion.
+            // Showing a skill's whole body back to the user helps nobody.
+            messages.append(.user(rawInput))
+            if title == "New chat" {
+                title = ChatHistoryStore.derivedTitle(from: messages)
+            }
+            startRun(userText: text, attachments: nil)
+
+        case .clear:
+            clearConversation()
+
+        case .newChat:
+            stop()
+            save()
+            newChat()
+
+        case .compact:
+            stop()
+            runTask = Task { [weak self] in await self?.compact() }
+
+        case .setPlanMode(let enabled):
+            setPlanMode(enabled)
+            messages.append(.note(planModeNote))
+
+        case .togglePlanMode:
+            setPlanMode(!planMode)
+            messages.append(.note(planModeNote))
+        }
+    }
+
+    private var planModeNote: String {
+        planMode
+            ? "**Plan mode on.** Research and a proposed plan first — nothing will be changed."
+            : "**Plan mode off.**"
+    }
+
+    /// Clears the conversation and deletes its saved transcript. Distinct from
+    /// `newChat`, which keeps what was there.
+    public func clearConversation() {
+        stop()
+        configuration.historyStore?.delete(sessionID)
+        newChat()
+    }
+
+    // MARK: - Compaction
+
+    /// Replaces the transcript with a summary of itself and reseeds the backend
+    /// from it, freeing context without losing the thread.
+    ///
+    /// The summary is seeded as a user/model exchange rather than left as a
+    /// local note: a conversation whose entire history is one model turn is one
+    /// most providers reject, and the model needs to have "heard" the recap for
+    /// it to carry weight.
+    public func compact() async {
+        guard !messages.isEmpty else { return }
+        isStreaming = true
+        modelIsWorking = true
+        error = nil
+        defer {
+            isStreaming = false
+            modelIsWorking = false
+        }
+
+        let transcript = compactionTranscript()
+        guard !transcript.isEmpty else { return }
+
+        do {
+            let summary = try await configuration.backend.generate("""
+            Summarize the following assistant conversation so it can continue in a fresh session. \
+            Preserve the user's goals, what has been done so far, files created or modified, key \
+            decisions and constraints, and the immediate next steps. Be dense and factual, and use \
+            Markdown.
+
+            \(transcript)
+            """)
+
+            let text = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                self.error = "Compaction produced an empty summary; the conversation is unchanged."
+                return
+            }
+
+            historyPrefix = [
+                .user("This conversation was compacted. Here is everything so far:\n\n\(text)"),
+                .model("Understood — I'll continue from that context."),
+            ]
+            messages = [.note("**Conversation compacted.**\n\n\(text)")]
+            todos = []
+            lastTurnUsage = .zero
+            configuredFingerprint = nil
+            save()
+        } catch {
+            self.error = "Compaction failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// The transcript as the summarizer should read it. Tool *results* are left
+    /// out deliberately — they are the bulk of what compaction exists to shed,
+    /// and the calls alone record what was done.
+    private func compactionTranscript() -> String {
+        var out = ""
+        for message in messages {
+            switch message.role {
+            case .user:
+                out += "User: \(message.content)\n\n"
+            case .assistant:
+                let prefix = message.isLocalNote ? "Note" : "Assistant"
+                out += "\(prefix): \(message.content)\n\n"
+            case .toolCall(let name):
+                out += "Tool call: \(name)\n"
+            case .toolResult:
+                continue
+            }
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Session lifecycle
 
     public func newChat() {
@@ -172,6 +418,7 @@ public final class ChatSession {
         sessionID = UUID()
         title = "New chat"
         configuredFingerprint = nil
+        historyPrefix = []
     }
 
     /// Restores a persisted transcript. Turns that were saved without their raw
@@ -185,6 +432,9 @@ public final class ChatSession {
         lastTurnUsage = .zero
         todos = []
         error = nil
+        // A loaded transcript brings its own history; anything a previous
+        // compaction seeded belongs to the session being replaced.
+        historyPrefix = []
         if let path = stored.workingDirectoryPath {
             workingDirectory = URL(fileURLWithPath: path)
         }
@@ -682,7 +932,7 @@ public final class ChatSession {
     /// their results) coalesce into one turn, mirroring how the loop emits them:
     /// parallel calls are a single model turn, their results a single user turn.
     func replayableTurns() -> [ChatTurn] {
-        var turns: [ChatTurn] = []
+        var turns: [ChatTurn] = historyPrefix
         var pendingCalls: [ToolCall] = []
         var pendingResults: [ToolResult] = []
 
@@ -705,6 +955,10 @@ public final class ChatSession {
         }
 
         for message in messages {
+            // Local notes were never the model's words, and replaying them as
+            // such makes it defend statements the host wrote.
+            if message.isLocalNote { continue }
+
             switch message.role {
             case .user:
                 flush()

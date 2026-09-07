@@ -110,6 +110,12 @@ public protocol ChatBackend: AnyObject, Sendable {
     /// the underlying request.
     func stream(_ input: TurnInput) -> AsyncThrowingStream<TurnChunk, Error>
 
+    /// Answers `prompt` outside the conversation: no history, no tools, and
+    /// nothing appended afterwards. Summarizing a transcript through `stream`
+    /// would otherwise append the summary request to the very history it is
+    /// summarizing. Used for compaction and title generation.
+    func generate(_ prompt: String) async throws -> String
+
     /// Current history, used to persist and to reconfigure without loss.
     var history: [ChatTurn] { get async }
 

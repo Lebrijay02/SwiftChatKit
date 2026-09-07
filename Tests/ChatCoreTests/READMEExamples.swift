@@ -129,6 +129,8 @@ actor EchoBackend: ChatBackend {
         turns = history
     }
 
+    func generate(_ prompt: String) async throws -> String { prompt }
+
     nonisolated func stream(_ input: TurnInput) -> AsyncThrowingStream<TurnChunk, Error> {
         AsyncThrowingStream { continuation in
             for part in input.parts {

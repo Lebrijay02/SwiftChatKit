@@ -33,6 +33,10 @@ public final class GeminiBackend: ChatBackend {
                               history: history)
     }
 
+    public func generate(_ prompt: String) async throws -> String {
+        try await state.generate(prompt)
+    }
+
     public var history: [ChatTurn] {
         get async { await state.history }
     }
@@ -141,6 +145,15 @@ private actor State {
         // Role "user" for both a user message and a batch of function
         // responses — Vertex AI rejects any other role on an incoming turn.
         return try chat.sendMessageStream([ModelContent(role: "user", parts: parts)])
+    }
+
+    /// One-shot, off to the side of the conversation. Built without tools or a
+    /// system instruction on purpose: a model holding the session's tools tends
+    /// to answer a "summarize this" prompt by calling one.
+    func generate(_ prompt: String) async throws -> String {
+        let plain = FirebaseAI.firebaseAI(backend: .vertexAI(location: configuration.location))
+            .generativeModel(modelName: configuration.model.rawValue)
+        return try await plain.generateContent(prompt).text ?? ""
     }
 
     private func rebuild(history: [ModelContent]) {

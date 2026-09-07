@@ -38,6 +38,10 @@ public final class OpenAIBackend: ChatBackend {
                               history: history)
     }
 
+    public func generate(_ prompt: String) async throws -> String {
+        try await state.generate(prompt)
+    }
+
     public var history: [ChatTurn] {
         get async { await state.history }
     }
@@ -144,6 +148,51 @@ private actor State {
         history.append(ChatTurn(role: .user, parts: input.parts))
         guard !modelParts.isEmpty else { return }
         history.append(ChatTurn(role: .model, parts: modelParts))
+    }
+
+    /// One-shot, unstreamed, and outside the conversation: no history, no tools,
+    /// and nothing appended afterwards. Sent without tools deliberately — a
+    /// model offered them tends to answer "summarize this" with a call.
+    func generate(_ prompt: String) async throws -> String {
+        var body: [String: ChatValue] = [
+            "model": .string(configuration.model.rawValue),
+            "messages": .array([["role": "user", "content": .string(prompt)]]),
+        ]
+        if let temperature = configuration.temperature {
+            body["temperature"] = .number(temperature)
+        }
+        body.merge(configuration.extraBody) { _, override in override }
+        // Whatever the host set for streaming, this request is not streamed.
+        body["stream"] = .bool(false)
+        body["stream_options"] = nil
+        body["tools"] = nil
+
+        var request = URLRequest(url: configuration.completionsURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = configuration.timeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !configuration.apiKey.isEmpty {
+            request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        for (field, value) in configuration.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        request.httpBody = try JSONEncoder().encode(ChatValue.object(body))
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let decoded = try? JSONDecoder().decode(OpenAIErrorEnvelope.self, from: data)
+            throw OpenAIBackendError.http(status: http.statusCode,
+                                          message: decoded?.error?.message)
+        }
+
+        guard case .object(let root) = try JSONDecoder().decode(ChatValue.self, from: data),
+              case .array(let choices)? = root["choices"],
+              case .object(let first)? = choices.first,
+              case .object(let message)? = first["message"],
+              let content = message["content"]?.stringValue
+        else { return "" }
+        return content
     }
 
     func send(_ input: TurnInput) async throws -> (URLSession.AsyncBytes, URLResponse) {

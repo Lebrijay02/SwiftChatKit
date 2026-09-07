@@ -38,6 +38,10 @@ public struct ChatSessionConfiguration: Sendable {
 
     public var skills: SkillsConfiguration
 
+    /// Leading-slash input the session answers itself. Empty by default: a host
+    /// that never registers one gets a chat where `/` is an ordinary character.
+    public var slashCommands: SlashCommandsConfiguration
+
     // MARK: Behavior
 
     /// Hard cap on tool round-trips in a single run. Reaching it appends a note
@@ -83,6 +87,7 @@ public struct ChatSessionConfiguration: Sendable {
                 additionalSections: [String] = [],
                 workingDirectory: URL? = nil,
                 skills: SkillsConfiguration = .disabled,
+                slashCommands: SlashCommandsConfiguration = .disabled,
                 maxTurns: Int = 100,
                 enableTodos: Bool = false,
                 enableQuestions: Bool = false,
@@ -102,6 +107,7 @@ public struct ChatSessionConfiguration: Sendable {
         self.additionalSections = additionalSections
         self.workingDirectory = workingDirectory
         self.skills = skills
+        self.slashCommands = slashCommands
         self.maxTurns = maxTurns
         self.enableTodos = enableTodos
         self.enableQuestions = enableQuestions

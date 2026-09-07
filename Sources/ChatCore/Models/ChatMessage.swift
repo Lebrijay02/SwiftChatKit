@@ -57,6 +57,14 @@ public struct ChatMessage: Identifiable, Equatable, Sendable {
 
     public var attachments: [Attachment]?
 
+    /// A message the user sees but the model never does — command feedback,
+    /// mode-change confirmations, error notes.
+    ///
+    /// Without this a note like "Plan mode on" is indistinguishable from an
+    /// assistant turn, so history replay feeds it back as something the model
+    /// said. It then answers for statements it never made.
+    public var isLocalNote: Bool
+
     public init(id: UUID = UUID(),
                 role: MessageRole,
                 content: String = "",
@@ -67,7 +75,8 @@ public struct ChatMessage: Identifiable, Equatable, Sendable {
                 callID: String? = nil,
                 rawArguments: [String: ChatValue]? = nil,
                 rawResult: [String: ChatValue]? = nil,
-                attachments: [Attachment]? = nil) {
+                attachments: [Attachment]? = nil,
+                isLocalNote: Bool = false) {
         self.id = id
         self.role = role
         self.content = content
@@ -79,6 +88,7 @@ public struct ChatMessage: Identifiable, Equatable, Sendable {
         self.rawArguments = rawArguments
         self.rawResult = rawResult
         self.attachments = attachments
+        self.isLocalNote = isLocalNote
     }
 
     public var toolName: String? { role.toolName }
@@ -99,6 +109,13 @@ public extension ChatMessage {
     static func assistant(_ text: String = "", isStreaming: Bool = false) -> ChatMessage {
         ChatMessage(role: .assistant, content: text, isStreaming: isStreaming,
                     status: isStreaming ? .inProgress : .completed)
+    }
+
+    /// Local feedback rendered like an assistant reply but never replayed to the
+    /// model: command output, mode changes, errors the user should read.
+    static func note(_ text: String) -> ChatMessage {
+        ChatMessage(role: .assistant, content: text, completedAt: Date(),
+                    status: .completed, isLocalNote: true)
     }
 
     static func toolCall(_ call: ToolCall) -> ChatMessage {

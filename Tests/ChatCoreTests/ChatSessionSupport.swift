@@ -19,20 +19,31 @@ actor MockBackend: ChatBackend {
     private var script: [[TurnChunk]]
     /// Set to have every turn take long enough to be cancelled.
     private let turnDelay: Duration?
+    /// What `generate` answers, for the compaction path.
+    private let generated: String
 
     private(set) var configuredInstruction = ""
     private(set) var configuredTools: [ToolDeclaration] = []
     private(set) var configuredHistory: [ChatTurn] = []
     private(set) var configureCount = 0
     private(set) var receivedInputs: [TurnInput] = []
+    private(set) var generatePrompts: [String] = []
 
-    init(script: [[TurnChunk]] = [], turnDelay: Duration? = nil) {
+    init(script: [[TurnChunk]] = [],
+         turnDelay: Duration? = nil,
+         generated: String = "a summary") {
         self.script = script
         self.turnDelay = turnDelay
+        self.generated = generated
     }
 
     var history: [ChatTurn] { configuredHistory }
     var modelName: String { "mock-1" }
+
+    func generate(_ prompt: String) async throws -> String {
+        generatePrompts.append(prompt)
+        return generated
+    }
 
     func configure(systemInstruction: String,
                    tools: [ToolDeclaration],
@@ -76,6 +87,7 @@ actor FailingBackend: ChatBackend {
     var history: [ChatTurn] { [] }
     var modelName: String { "failing-1" }
     func configure(systemInstruction: String, tools: [ToolDeclaration], history: [ChatTurn]) {}
+    func generate(_ prompt: String) async throws -> String { throw Failure() }
 
     nonisolated func stream(_ input: TurnInput) -> AsyncThrowingStream<TurnChunk, Error> {
         AsyncThrowingStream { $0.finish(throwing: Failure()) }

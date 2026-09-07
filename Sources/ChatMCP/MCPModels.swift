@@ -13,9 +13,9 @@ import MCP
 public enum MCPAuth: Codable, Equatable, Sendable {
     case none
     case bearer(token: String)
-    /// Defers to the host's `MCPAuthorizationProvider`. The package deliberately
-    /// ships no OAuth flow of its own: the browser hand-off needs a presentation
-    /// anchor and a redirect scheme, both of which only the host can supply.
+    /// Defers to the session's `MCPAuthorizationProvider`. `MCPOAuthProvider`
+    /// implements the standard flow and needs only a redirect scheme the host
+    /// has registered; a host with its own identity stack conforms instead.
     case oauth
 }
 
@@ -241,8 +241,12 @@ public typealias MCPTransportFactory =
 
 // MARK: - Auth seam
 
-/// Supplies bearer tokens for servers configured with `.oauth`. Implement this
-/// in the host, where the browser hand-off and token storage belong.
+/// Supplies bearer tokens for servers configured with `.oauth`.
+///
+/// `MCPOAuthProvider` is the stock implementation — Authorization Code with
+/// PKCE, dynamic registration and Keychain storage — and is what most hosts
+/// want. This stays a protocol for the ones that already have an identity
+/// stack, or that get tokens from somewhere other than a browser.
 public protocol MCPAuthorizationProvider: Sendable {
     func accessToken(for url: URL) async throws -> String
 }
