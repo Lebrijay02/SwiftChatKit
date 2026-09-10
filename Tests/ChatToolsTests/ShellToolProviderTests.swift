@@ -45,11 +45,22 @@ struct ShellToolProviderTests {
         #expect(result.errorMessage?.contains("non-empty") == true)
     }
 
-    @Test("Shell commands are never auto-allowed and always count as mutating")
+    @Test("Every way of running a command needs approval; only reading a log does not")
     func permissionPosture() {
         let provider = ShellToolProvider()
-        #expect(provider.autoAllowedToolNames.isEmpty)
-        #expect(provider.mutatingToolNames == [ShellToolProvider.toolName])
+
+        // Running something is always the user's call, foreground or detached.
+        #expect(provider.mutatingToolNames == [
+            ShellToolProvider.toolName,
+            ShellToolProvider.startBackgroundProcess,
+            ShellToolProvider.killBackgroundProcess,
+        ])
+        #expect(provider.autoAllowedToolNames.contains(ShellToolProvider.toolName) == false)
+        #expect(provider.autoAllowedToolNames.contains(ShellToolProvider.startBackgroundProcess) == false)
+
+        // Reading back output the user already approved producing is not a
+        // second decision to make them take.
+        #expect(provider.autoAllowedToolNames == [ShellToolProvider.readProcessLog])
     }
 
     @Test("The approval card shows the command, titled by the model's description")

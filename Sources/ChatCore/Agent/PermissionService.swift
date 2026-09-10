@@ -101,7 +101,7 @@ public final class PermissionService {
     /// Tools that never prompt — read-only operations and the agent's own
     /// bookkeeping tools. Supplied by configuration rather than hardcoded,
     /// because which tools are safe depends on which providers are installed.
-    public let autoAllowed: Set<String>
+    public private(set) var autoAllowed: Set<String>
 
     /// Global override: when set, nothing prompts, regardless of tool name.
     /// Unlike `autoAllowed`/`alwaysAllowed` — which only cover tools known by
@@ -113,6 +113,13 @@ public final class PermissionService {
 
     private var continuation: CheckedContinuation<PermissionDecision, Never>?
     private let store: PermissionStore
+
+    /// Folds in the auto-allow set of a provider added after init, so a tool
+    /// that never needed approval doesn't start asking for it just because its
+    /// provider arrived late.
+    public func addAutoAllowed(_ names: Set<String>) {
+        autoAllowed.formUnion(names)
+    }
 
     public init(autoAllowed: Set<String> = [],
                 autoApproveAll: Bool = false,

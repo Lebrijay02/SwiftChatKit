@@ -6,6 +6,7 @@
 import Foundation
 
 public enum FileToolError: LocalizedError, Equatable {
+    case searchTooBroad
     case notFound(String)
     case notADirectory(String)
     case notUTF8(String)
@@ -28,6 +29,8 @@ public enum FileToolError: LocalizedError, Equatable {
             return "Could not find the text to replace in \(path). Searched for:\n\(preview)"
         case .invalidRegex(let pattern):
             return "Invalid regular expression: \(pattern)"
+        case .searchTooBroad:
+            return "Search is too broad. Specify a 'path' or 'filePattern' to narrow the scope."
         }
     }
 }

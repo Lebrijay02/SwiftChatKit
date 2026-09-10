@@ -101,6 +101,21 @@ public actor LocalFileSystem: FileSystemProviding {
         }
     }
 
+    // MARK: - Identity and staleness
+
+    public func resolvedPath(_ path: String) -> String {
+        resolve(path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    public func modificationDate(at path: String) throws -> Date? {
+        let url = resolve(path)
+        return try withAccess {
+            guard fileManager.fileExists(atPath: url.path) else { return nil }
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
+            return values.contentModificationDate
+        }
+    }
+
     // MARK: - Writing
 
     public func write(_ contents: String, to path: String) throws {
@@ -277,6 +292,12 @@ public actor LocalFileSystem: FileSystemProviding {
                      caseInsensitive: Bool,
                      outputMode: GrepOutputMode) throws -> [String: ChatValue] {
         let base = resolve(path ?? "")
+
+        // Guard against repo-wide recursive searches without a filter.
+        if (path == nil || path == "." || path == "") && filePattern == nil {
+            throw FileToolError.searchTooBroad
+        }
+
         let options: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
         guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {
             throw FileToolError.invalidRegex(pattern)
@@ -291,6 +312,12 @@ public actor LocalFileSystem: FileSystemProviding {
             for url in walk(base) {
                 let relative = Self.relativePath(of: url, from: base)
                 if let filePattern, !GlobPattern.matches(relative, pattern: filePattern) { continue }
+
+                let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+                let fileSize = attributes?[.size] as? Int64 ?? 0
+                // Skip huge files (> 1MB) to prevent hangs during read/regex.
+                guard fileSize < 1_000_000 else { continue }
+
                 guard let data = try? Data(contentsOf: url),
                       let text = String(data: data, encoding: .utf8) else { continue }
 
@@ -307,9 +334,13 @@ public actor LocalFileSystem: FileSystemProviding {
                             "text": .string(line)
                         ]))
                     }
+                    
+                    // Cap matches to prevent massive context costs/tool timeouts.
+                    if total >= 2000 { break }
                 }
 
                 guard fileCount > 0 else { continue }
+                if total >= 2000 { break }
                 switch outputMode {
                 case .filesWithMatches: files.append(.string(url.path))
                 case .count: counts.append(.object(["file": .string(url.path),

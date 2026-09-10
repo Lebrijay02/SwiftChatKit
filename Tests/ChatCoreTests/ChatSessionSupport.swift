@@ -127,6 +127,14 @@ actor MockProvider: ToolProvider {
 
     var declarations: [ToolDeclaration] { tools }
 
+    func executionMode(for call: ToolCall) async -> ToolExecutionMode {
+        autoAllowedToolNames.contains(call.name) ? .concurrent : .exclusive
+    }
+
+    func retrySafety(for call: ToolCall) async -> ToolRetrySafety {
+        autoAllowedToolNames.contains(call.name) ? .idempotent : .never
+    }
+
     func execute(_ call: ToolCall) async -> ToolResult {
         executed.append(call)
         return handler(call)
@@ -143,10 +151,13 @@ actor FlakyProvider: ToolProvider {
         [ToolDeclaration(name: "fetch", description: "Fetches something.")]
     }
 
+    func executionMode(for call: ToolCall) async -> ToolExecutionMode { .concurrent }
+    func retrySafety(for call: ToolCall) async -> ToolRetrySafety { .idempotent }
+
     func execute(_ call: ToolCall) async -> ToolResult {
         attempts += 1
         return attempts == 1
-            ? .failure(call, "URLError: the connection timed out")
+            ? .failure(call, "The connection timed out.", kind: .transient)
             : .success(call, ["body": "ok"])
     }
 }

@@ -52,6 +52,14 @@ public struct ChatSessionConfiguration: Sendable {
     /// Hard cap on tool round-trips in a single run. Reaching it appends a note
     /// and stops — a model in a loop should cost a bounded amount of money.
     public var maxTurns: Int
+    public var budget: AgentBudget
+    public var modelRetryPolicy: RetryPolicy
+    public var toolRetryPolicy: RetryPolicy
+    public var fallbackBackend: (any ChatBackend)?
+    public var maximumOutputRecoveries: Int
+    public var maximumCompletionValidationAttempts: Int
+    public var maximumConcurrentTools: Int
+    public var inFlightInputPolicy: InFlightInputPolicy
 
     /// Offers `todoWrite`. Off by default: a session ships no tools it wasn't
     /// asked for, and a chat with no multi-step work has no use for a checklist.
@@ -59,6 +67,15 @@ public struct ChatSessionConfiguration: Sendable {
     /// Offers `askUser`. Off by default, and requires the host to render
     /// `questions.pending` — a question nobody displays parks the run forever.
     public var enableQuestions: Bool
+
+    /// Tools withheld from the prompt until the model goes looking for them.
+    ///
+    /// Every declaration costs tokens on every single request, and a tool used
+    /// once a week is paying that rent all week. Naming one here replaces its
+    /// schema with a line in `toolSearch`'s index; the full schema is sent only
+    /// after the model searches for it, and stays for the rest of the session.
+    /// Empty by default, which offers no `toolSearch` at all.
+    public var deferredToolNames: Set<String>
 
     /// Tools that never prompt for approval. Merged with every provider's
     /// `autoAllowedToolNames`.
@@ -70,6 +87,10 @@ public struct ChatSessionConfiguration: Sendable {
     public var historyStore: ChatHistoryStore?
     public var compressor: (any ContextCompressor)?
     public var telemetry: (any ChatTelemetry)?
+    public var transitionTelemetry: (any AgentTransitionTelemetry)?
+    public var tokenEstimator: any TokenEstimating
+    public var toolHooks: [any ToolHook]
+    public var completionValidators: [any CompletionValidator]
 
     /// Called on every `save()`; whatever it returns lands in
     /// `StoredSession.metadata`. The seam for a host's own per-session record —
@@ -95,13 +116,26 @@ public struct ChatSessionConfiguration: Sendable {
                 slashCommands: SlashCommandsConfiguration = .disabled,
                 context: ContextPolicy = .unbounded,
                 maxTurns: Int = 100,
+                budget: AgentBudget? = nil,
+                modelRetryPolicy: RetryPolicy = RetryPolicy(),
+                toolRetryPolicy: RetryPolicy = RetryPolicy(maxAttempts: 2),
+                fallbackBackend: (any ChatBackend)? = nil,
+                maximumOutputRecoveries: Int = 3,
+                maximumCompletionValidationAttempts: Int = 3,
+                maximumConcurrentTools: Int = 8,
+                inFlightInputPolicy: InFlightInputPolicy = .reject,
                 enableTodos: Bool = false,
                 enableQuestions: Bool = false,
+                deferredToolNames: Set<String> = [],
                 autoAllowedTools: Set<String> = [],
                 permissionStore: any PermissionStore = UserDefaultsPermissionStore(),
                 historyStore: ChatHistoryStore? = nil,
                 compressor: (any ContextCompressor)? = nil,
                 telemetry: (any ChatTelemetry)? = nil,
+                transitionTelemetry: (any AgentTransitionTelemetry)? = nil,
+                tokenEstimator: any TokenEstimating = CharacterTokenEstimator(),
+                toolHooks: [any ToolHook] = [],
+                completionValidators: [any CompletionValidator] = [],
                 sessionMetadata: (@MainActor @Sendable () -> [String: ChatValue])? = nil,
                 onSessionMetadataLoaded: (@MainActor @Sendable ([String: ChatValue]) -> Void)? = nil,
                 onRunFinished: (@MainActor @Sendable (ChatRunOutcome) -> Void)? = nil) {
@@ -116,13 +150,27 @@ public struct ChatSessionConfiguration: Sendable {
         self.slashCommands = slashCommands
         self.context = context
         self.maxTurns = maxTurns
+        self.budget = budget ?? AgentBudget(maxTurns: maxTurns)
+        self.budget.maxTurns = maxTurns
+        self.modelRetryPolicy = modelRetryPolicy
+        self.toolRetryPolicy = toolRetryPolicy
+        self.fallbackBackend = fallbackBackend
+        self.maximumOutputRecoveries = max(0, maximumOutputRecoveries)
+        self.maximumCompletionValidationAttempts = max(0, maximumCompletionValidationAttempts)
+        self.maximumConcurrentTools = max(1, maximumConcurrentTools)
+        self.inFlightInputPolicy = inFlightInputPolicy
         self.enableTodos = enableTodos
         self.enableQuestions = enableQuestions
+        self.deferredToolNames = deferredToolNames
         self.autoAllowedTools = autoAllowedTools
         self.permissionStore = permissionStore
         self.historyStore = historyStore
         self.compressor = compressor
         self.telemetry = telemetry
+        self.transitionTelemetry = transitionTelemetry
+        self.tokenEstimator = tokenEstimator
+        self.toolHooks = toolHooks
+        self.completionValidators = completionValidators
         self.sessionMetadata = sessionMetadata
         self.onSessionMetadataLoaded = onSessionMetadataLoaded
         self.onRunFinished = onRunFinished
@@ -135,5 +183,6 @@ public enum ChatRunOutcome: Equatable, Sendable {
     case completed
     case stopped
     case turnLimitReached
+    case budgetExceeded
     case failed(String)
 }

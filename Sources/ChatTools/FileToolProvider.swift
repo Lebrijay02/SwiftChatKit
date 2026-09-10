@@ -29,6 +29,9 @@ public enum FileToolName {
 public final class FileToolProvider: ToolProvider {
 
     private let fileSystem: any FileSystemProviding
+    /// What the model has read, so a write can be refused when the file moved
+    /// underneath it. See `FileReadLedger`.
+    private let ledger = FileReadLedger()
 
     public init(fileSystem: any FileSystemProviding) {
         self.fileSystem = fileSystem
@@ -54,6 +57,24 @@ public final class FileToolProvider: ToolProvider {
 
     public var autoAllowedToolNames: Set<String> { Self.readOnlyNames }
     public var mutatingToolNames: Set<String> { Self.mutatingNames }
+
+    public func executionMode(for call: ToolCall) async -> ToolExecutionMode {
+        Self.readOnlyNames.contains(call.name) ? .concurrent : .exclusive
+    }
+
+    public func retrySafety(for call: ToolCall) async -> ToolRetrySafety {
+        Self.readOnlyNames.contains(call.name) ? .idempotent : .never
+    }
+
+    public func timeout(for call: ToolCall) async -> Duration? { .seconds(60) }
+
+    public func interruptionBehavior(for call: ToolCall) async -> ToolInterruptionBehavior {
+        Self.readOnlyNames.contains(call.name) ? .cancel : .finishBeforeInterrupt
+    }
+
+    public func resultRetention(for call: ToolCall) async -> ToolResultRetention {
+        Self.mutatingNames.contains(call.name) ? .retain : .summarize
+    }
 
     // MARK: - Declarations
 
@@ -105,9 +126,10 @@ public final class FileToolProvider: ToolProvider {
         ToolDeclaration(
             name: FileToolName.writeFile,
             description: """
-                Writes content to a file, creating parent directories as needed \
-                and overwriting any existing file. Prefer editFile for changes \
-                to a file that already exists.
+                Writes content to a file, creating parent directories as needed. \
+                Prefer editFile for changes to a file that already exists — this \
+                replaces the whole file, and to overwrite an existing one you \
+                must have read it first and it must not have changed since.
                 """,
             parameters: [
                 "path": .string(description: "File path."),
@@ -118,10 +140,12 @@ public final class FileToolProvider: ToolProvider {
             name: FileToolName.editFile,
             description: """
                 Applies one or more exact find-and-replace edits to a file, in \
-                order, and returns a diff. Each oldText must appear in the file \
-                or the whole call fails. Include enough surrounding context to \
-                make each oldText unique. Set dryRun to preview the diff \
-                without writing.
+                order, and returns a diff. You must have read the file with \
+                readTextFile first, and the call is refused if anything else \
+                changed the file since — re-read it and rebase your edit. Each \
+                oldText must appear in the file or the whole call fails. Include \
+                enough surrounding context to make each oldText unique. Set \
+                dryRun to preview the diff without writing.
                 """,
             parameters: [
                 "path": .string(description: "File path."),
@@ -277,6 +301,7 @@ public final class FileToolProvider: ToolProvider {
             case FileToolName.readTextFile:
                 let contents = try await fileSystem.readText(
                     at: string("path"), offset: integer("offset"), limit: integer("limit"))
+                await noteRead(string("path"))
                 return .success(call, ["content": .string(contents)])
 
             case FileToolName.readMediaFile:
@@ -297,6 +322,7 @@ public final class FileToolProvider: ToolProvider {
                     // in place so the model can still use the rest.
                     do {
                         let contents = try await fileSystem.readText(at: path, offset: nil, limit: nil)
+                        await noteRead(path)
                         files.append(.object(["path": .string(path), "content": .string(contents)]))
                     } catch {
                         files.append(.object(["path": .string(path),
@@ -306,14 +332,26 @@ public final class FileToolProvider: ToolProvider {
                 return .success(call, ["files": .array(files)])
 
             case FileToolName.writeFile:
+                if let refusal = try await staleness(of: string("path"), toolName: call.name) {
+                    return .failure(call, refusal)
+                }
                 try await fileSystem.write(string("content"), to: string("path"))
+                await noteRead(string("path"))
                 return .success(call, ["written": .string(string("path"))])
 
             case FileToolName.editFile:
+                let dryRun = arguments["dryRun"]?.boolValue ?? false
+                if !dryRun,
+                   let refusal = try await staleness(of: string("path"), toolName: call.name) {
+                    return .failure(call, refusal)
+                }
                 let diff = try await fileSystem.edit(
                     path: string("path"),
                     edits: Self.edits(from: arguments),
-                    dryRun: arguments["dryRun"]?.boolValue ?? false)
+                    dryRun: dryRun)
+                // A dry run changed nothing, so the model's picture of the file
+                // is no fresher than it was — only a real write re-baselines it.
+                if !dryRun { await noteRead(string("path")) }
                 return .success(call, ["diff": .string(diff)])
 
             case FileToolName.createDirectory:
@@ -361,6 +399,25 @@ public final class FileToolProvider: ToolProvider {
         } catch {
             return .failure(call, error.localizedDescription)
         }
+    }
+
+    // MARK: - Staleness
+
+    /// Records the file's current mtime as what the model now knows. Failures to
+    /// stat are swallowed: not being able to baseline a file is a reason to skip
+    /// the check later, not a reason to fail a read that already succeeded.
+    private func noteRead(_ path: String) async {
+        let key = await fileSystem.resolvedPath(path)
+        let modifiedAt = try? await fileSystem.modificationDate(at: path)
+        await ledger.record(key, modifiedAt: modifiedAt ?? nil)
+    }
+
+    /// The message to refuse `toolName` with, or nil to let the write proceed.
+    private func staleness(of path: String, toolName: String) async throws -> String? {
+        let key = await fileSystem.resolvedPath(path)
+        let current = try await fileSystem.modificationDate(at: path)
+        return await ledger.check(key, currentModifiedAt: current)
+            .refusal(path: path, toolName: toolName)
     }
 
     private static func edits(from arguments: [String: ChatValue]) -> [FileEdit] {

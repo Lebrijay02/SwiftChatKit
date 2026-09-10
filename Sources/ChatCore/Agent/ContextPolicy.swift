@@ -23,6 +23,14 @@ import Foundation
 /// summarizes itself and continues from the summary.
 public struct ContextPolicy: Sendable, Equatable {
 
+    /// What the session does once the prompt crosses `compactionThreshold`.
+    public enum Overflow: String, Sendable, Equatable, CaseIterable {
+        /// Summarize the conversation and continue from the summary.
+        case compact
+        /// Keep the full transcript on screen but replay only its recent tail.
+        case slidingWindow
+    }
+
     /// The model's input limit in tokens, or nil to never compact on size.
     ///
     /// There is no portable way to ask a backend for this, and guessing wrong
@@ -48,12 +56,28 @@ public struct ContextPolicy: Sendable, Equatable {
     /// still not be one `readFile` away from an unusable window.
     public var maxToolResultCharacters: Int?
 
+    /// How the session sheds context once the threshold is crossed.
+    ///
+    /// Compaction preserves meaning at the cost of detail; a sliding window
+    /// preserves detail for the turns it keeps and drops the rest outright.
+    /// Neither is right for every host, and the choice is often the user's, so
+    /// it is a setting rather than a policy this type picks.
+    public var overflow: Overflow
+
+    /// Fraction of the transcript kept when a sliding window slides. Ignored
+    /// under `.compact`.
+    public var retainedFraction: Double
+
     public init(contextWindow: Int? = nil,
                 compactionThreshold: Double = 0.75,
-                maxToolResultCharacters: Int? = nil) {
+                maxToolResultCharacters: Int? = nil,
+                overflow: Overflow = .compact,
+                retainedFraction: Double = 0.5) {
         self.contextWindow = contextWindow
         self.compactionThreshold = compactionThreshold
         self.maxToolResultCharacters = maxToolResultCharacters
+        self.overflow = overflow
+        self.retainedFraction = retainedFraction
     }
 
     /// No truncation and no automatic compaction: the session grows until the
@@ -66,10 +90,12 @@ public struct ContextPolicy: Sendable, Equatable {
     /// large file and far short of a window on its own.
     public static func window(_ tokens: Int,
                               threshold: Double = 0.75,
-                              maxToolResultCharacters: Int? = 100_000) -> ContextPolicy {
+                              maxToolResultCharacters: Int? = 100_000,
+                              overflow: Overflow = .compact) -> ContextPolicy {
         ContextPolicy(contextWindow: tokens,
                       compactionThreshold: threshold,
-                      maxToolResultCharacters: maxToolResultCharacters)
+                      maxToolResultCharacters: maxToolResultCharacters,
+                      overflow: overflow)
     }
 
     /// Whether `promptTokens` from the turn just finished has crossed the line.

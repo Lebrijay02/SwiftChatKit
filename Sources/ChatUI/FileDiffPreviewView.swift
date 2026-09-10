@@ -161,7 +161,13 @@ public struct FileDiffPreviewView: View {
         var oldCounter = 1
         var newCounter = 1
 
-        for line in rawDiff.components(separatedBy: .newlines) {
+        let rawLines = rawDiff.components(separatedBy: .newlines)
+        // Guard against massive diffs hanging the UI.
+        let limit = 2000
+        let truncated = rawLines.count > limit
+        let linesToProcess = truncated ? Array(rawLines.prefix(limit)) : rawLines
+
+        for line in linesToProcess {
             if line.hasPrefix("---") || line.hasPrefix("+++") {
                 continue
             } else if line.hasPrefix("@@") {
@@ -184,14 +190,29 @@ public struct FileDiffPreviewView: View {
             }
         }
 
+        if truncated {
+            lines.append(DiffLine(oldLineNumber: nil, newLineNumber: nil, type: .header, text: "... truncated ..."))
+        }
+
         return (lines, additions, deletions)
     }
 
     nonisolated static func parseWriteFile(content: String) -> (lines: [DiffLine], additions: Int, deletions: Int) {
-        let rawLines = content.components(separatedBy: .newlines)
-        let lines = rawLines.enumerated().map {
+        var rawLines = content.components(separatedBy: .newlines)
+        let limit = 2000
+        let truncated = rawLines.count > limit
+        if truncated {
+            rawLines = Array(rawLines.prefix(limit))
+        }
+
+        var lines = rawLines.enumerated().map {
             DiffLine(oldLineNumber: nil, newLineNumber: $0.offset + 1, type: .added, text: $0.element)
         }
+        
+        if truncated {
+            lines.append(DiffLine(oldLineNumber: nil, newLineNumber: nil, type: .header, text: "... truncated ..."))
+        }
+        
         return (lines, rawLines.count, 0)
     }
 }

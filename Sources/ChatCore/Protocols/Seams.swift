@@ -132,10 +132,33 @@ public protocol FileSystemProviding: Sendable {
     func move(from: String, to: String) async throws
     func info(at path: String) async throws -> [String: ChatValue]
 
+    /// Absolute, resolved form of a tool-supplied path. Used as the identity a
+    /// staleness check is keyed on, so `./x.swift` and `/root/x.swift` have to
+    /// agree — otherwise a file read by one spelling looks unread by the other.
+    func resolvedPath(_ path: String) async -> String
+
+    /// Last-modified time, or nil when there is no file or the provider cannot
+    /// report one. Nil disables the staleness check rather than blocking the
+    /// edit: a virtual or remote filesystem that can't answer should still be
+    /// editable.
+    func modificationDate(at path: String) async throws -> Date?
+
     func glob(pattern: String, in path: String?) async throws -> [String]
     func grep(pattern: String,
               in path: String?,
               filePattern: String?,
               caseInsensitive: Bool,
               outputMode: GrepOutputMode) async throws -> [String: ChatValue]
+}
+
+public extension FileSystemProviding {
+
+    /// Identity of last resort. A provider that resolves paths at all should
+    /// override this; returning the raw string only makes the staleness check
+    /// stricter, never laxer.
+    func resolvedPath(_ path: String) async -> String { path }
+
+    /// Fail-open. A provider that cannot report mtimes keeps working exactly as
+    /// it did before the check existed.
+    func modificationDate(at path: String) async throws -> Date? { nil }
 }

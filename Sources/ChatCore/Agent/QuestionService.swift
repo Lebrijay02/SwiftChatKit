@@ -34,17 +34,24 @@ public struct UserQuestion: Identifiable, Equatable, Sendable {
     /// free-form text.
     public let options: [UserQuestionOption]
     public let multiSelect: Bool
+    /// Markdown shown above the choices — the diff, snippet, or layout the
+    /// question is about. Asking "should I use this structure?" is a guess
+    /// until the user can see the structure, so the answer is only as good as
+    /// what was on screen when they gave it.
+    public let previewContent: String?
 
     public init(id: UUID = UUID(),
                 question: String,
                 header: String = "",
                 options: [UserQuestionOption] = [],
-                multiSelect: Bool = false) {
+                multiSelect: Bool = false,
+                previewContent: String? = nil) {
         self.id = id
         self.question = question
         self.header = header
         self.options = options
         self.multiSelect = multiSelect
+        self.previewContent = previewContent
     }
 }
 
@@ -108,10 +115,12 @@ public final class QuestionService {
                                           description: opt["description"]?.stringValue ?? "")
             }
 
+            let preview = item["previewContent"]?.stringValue
             return UserQuestion(question: text,
                                 header: item["header"]?.stringValue ?? "",
                                 options: options,
-                                multiSelect: item["multiSelect"]?.boolValue ?? false)
+                                multiSelect: item["multiSelect"]?.boolValue ?? false,
+                                previewContent: (preview?.isEmpty ?? true) ? nil : preview)
         }
 
         return questions.isEmpty ? nil : questions

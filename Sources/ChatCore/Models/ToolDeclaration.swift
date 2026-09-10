@@ -98,12 +98,18 @@ public struct ToolResult: Equatable, Sendable {
 
     /// Errors are returned to the model as data, never thrown past the loop —
     /// a failed tool is something the model should read and recover from.
-    public static func failure(_ call: ToolCall, _ message: String) -> ToolResult {
-        ToolResult(callID: call.id, name: call.name,
-                   payload: ["error": .string(message)])
+    public static func failure(_ call: ToolCall,
+                               _ message: String,
+                               kind: ToolFailureKind? = nil) -> ToolResult {
+        var payload: [String: ChatValue] = ["error": .string(message)]
+        if let kind { payload["errorKind"] = .string(kind.rawValue) }
+        return ToolResult(callID: call.id, name: call.name, payload: payload)
     }
 
     public var errorMessage: String? { payload["error"]?.stringValue }
+    public var failureKind: ToolFailureKind? {
+        payload["errorKind"]?.stringValue.flatMap(ToolFailureKind.init(rawValue:))
+    }
 }
 
 // MARK: - Finish reason

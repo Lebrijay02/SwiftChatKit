@@ -120,6 +120,10 @@ public struct QuestionCardView: View {
             }
             Text(question.question).fontWeight(.medium)
 
+            if let preview = question.previewContent {
+                previewPane(preview)
+            }
+
             ForEach(question.options) { option in
                 optionRow(option, for: question)
             }
@@ -136,6 +140,25 @@ public struct QuestionCardView: View {
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(palette.codeBackground.opacity(0.35))
+        )
+    }
+
+    /// The snippet, diff, or layout the question is about, shown above the
+    /// choices. Height-capped and scrollable: a preview tall enough to push the
+    /// Submit button off screen makes the card unanswerable.
+    private func previewPane(_ markdown: String) -> some View {
+        ScrollView {
+            StreamingTextView(text: markdown)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(8)
+        }
+        .frame(maxHeight: 260)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(palette.background.opacity(0.6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(palette.outline.opacity(0.6)))
         )
     }
 

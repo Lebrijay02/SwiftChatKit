@@ -16,6 +16,7 @@ private func makeSession(
     backend: any ChatBackend,
     providers: [any ToolProvider] = [],
     maxTurns: Int = 100,
+    maximumOutputRecoveries: Int = 3,
     compressor: (any ContextCompressor)? = nil,
     sessionTools: Bool = false,
     recorder: RunRecorder
@@ -24,6 +25,8 @@ private func makeSession(
         backend: backend,
         toolProviders: providers,
         maxTurns: maxTurns,
+        modelRetryPolicy: RetryPolicy(maxAttempts: 1),
+        maximumOutputRecoveries: maximumOutputRecoveries,
         enableTodos: sessionTools,
         enableQuestions: sessionTools,
         permissionStore: EphemeralPermissionStore(),
@@ -124,6 +127,7 @@ struct PlainTurnTests {
         let recorder = RunRecorder()
         let session = makeSession(
             backend: MockBackend(script: [[.text("Partial"), .finish(.maxTokens)]]),
+            maximumOutputRecoveries: 0,
             recorder: recorder)
 
         session.send("hi")
@@ -166,7 +170,9 @@ struct ToolLoopTests {
     private func toolCallScript(_ name: String,
                                 arguments: [String: ChatValue] = [:],
                                 then reply: String = "Done.") -> [[TurnChunk]] {
-        [[.toolCall(ToolCall(id: "c1", name: name, arguments: arguments)), .finish(.stop)],
+        let resolvedArguments: [String: ChatValue] =
+            name == "readFile" && arguments.isEmpty ? ["path": "a"] : arguments
+        return [[.toolCall(ToolCall(id: "c1", name: name, arguments: resolvedArguments)), .finish(.stop)],
          [.text(reply), .finish(.stop)]]
     }
 
@@ -251,7 +257,7 @@ struct ToolLoopTests {
         let provider = MockProvider.readFile()
         // Never stops calling tools.
         let backend = MockBackend(script: Array(repeating:
-            [.toolCall(ToolCall(name: "readFile")), .finish(.stop)], count: 20))
+            [.toolCall(ToolCall(name: "readFile", arguments: ["path": "a"])), .finish(.stop)], count: 20))
         let session = makeSession(backend: backend, providers: [provider],
                                   maxTurns: 3, recorder: recorder)
 
@@ -589,7 +595,7 @@ struct SessionConfigurationTests {
         let long = String(repeating: "x", count: 500)
         let provider = MockProvider.readFile { .success($0, ["content": .string(long)]) }
         let backend = MockBackend(script: [
-            [.toolCall(ToolCall(id: "r", name: "readFile")), .finish(.stop)],
+            [.toolCall(ToolCall(id: "r", name: "readFile", arguments: ["path": "a"])), .finish(.stop)],
             [.text("Read."), .finish(.stop)],
         ])
         let session = makeSession(backend: backend, providers: [provider],
@@ -609,7 +615,7 @@ struct SessionConfigurationTests {
         let recorder = RunRecorder()
         let provider = MockProvider.readFile()
         let backend = MockBackend(script: [
-            [.toolCall(ToolCall(id: "r", name: "readFile")), .finish(.stop)],
+            [.toolCall(ToolCall(id: "r", name: "readFile", arguments: ["path": "a"])), .finish(.stop)],
             [.text("Read."), .finish(.stop)],
         ])
         let session = makeSession(backend: backend, providers: [provider],

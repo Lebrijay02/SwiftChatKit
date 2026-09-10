@@ -18,11 +18,12 @@ public enum AgentTools {
     public static let todoWrite = "todoWrite"
     public static let exitPlanMode = "exitPlanMode"
     public static let askUser = "askUser"
+    public static let toolSearch = "toolSearch"
 
     /// Every name the session can handle itself. Whichever of them are enabled
     /// are dispatched before any provider is consulted, so a provider cannot
     /// shadow them — but none of them are offered unless the host asks.
-    public static let allNames: Set<String> = [todoWrite, exitPlanMode, askUser]
+    public static let allNames: Set<String> = [todoWrite, exitPlanMode, askUser, toolSearch]
 
     public static let todoWriteDeclaration = ToolDeclaration(
         name: todoWrite,
@@ -50,6 +51,8 @@ public enum AgentTools {
         is genuinely the user's to make (requirements, preferences, trade-offs) instead of \
         asking in prose. Send 1-4 questions at once, each with 2-4 mutually exclusive options; \
         the user can always answer with their own free text instead of picking an option. \
+        When the decision is about something concrete — a snippet, a diff, a layout — put it in \
+        previewContent so they can see what they are choosing between. \
         Don't use it for facts you can discover yourself or choices with an obvious default.
         """,
         parameters: [
@@ -67,11 +70,30 @@ public enum AgentTools {
                                 description: "One selectable option"),
                             description: "2-4 distinct choices for this question"),
                         "multiSelect": .boolean(description: "true when several options may be chosen together"),
+                        "previewContent": .string(description: "Optional Markdown shown above the choices — the code, diff, or layout the question is about. Use a fenced block for code. Include it whenever the user is choosing between things they need to see to judge."),
                     ],
-                    optional: ["multiSelect"],
+                    optional: ["multiSelect", "previewContent"],
                     description: "One question"),
                 description: "The questions to ask (1-4)"),
         ])
+
+    /// Offered only while some deferred tool is still hidden. Once the model has
+    /// loaded them all there is nothing left to search for, and leaving the tool
+    /// in the prompt would just invite calls that return nothing.
+    public static let toolSearchDeclaration = ToolDeclaration(
+        name: toolSearch,
+        description: """
+        Find specialized tools that are not listed in your prompt. This session keeps rarely-used \
+        tools out of the way until they are needed, so if a task sounds like it needs a capability \
+        you cannot see — scaffolding a project, indexing a workspace, a specific integration — \
+        search for it here before concluding it is impossible. Describe the capability in plain \
+        words ("create a new Xcode project"), not a guessed tool name. Anything found becomes \
+        callable on your next step, so search first and call it after.
+        """,
+        parameters: [
+            "query": .string(description: "What you are trying to do, in plain words. Omit to list every available tool."),
+        ],
+        optional: ["query"])
 
     /// Offered to the model only while plan mode is active. A model that can see
     /// this tool outside plan mode will eventually call it.

@@ -84,15 +84,30 @@ public final class ChatSession {
 
     private var configuration: ChatSessionConfiguration
     private var runTask: Task<Void, Never>?
+    private let agentRunner = AgentRunner()
+    private var queuedInputs: [(text: String, attachments: [Attachment]?)] = []
     /// Identity of the configuration the backend was last built with. Rebuilding
     /// re-uploads the system prompt and tool list, so it happens only on change.
     private var configuredFingerprint: String?
+
+    /// Deferred tools the model has found with `toolSearch` and may now call.
+    /// Grows over a session and never shrinks: a tool it needed once it will
+    /// plausibly need again, and re-hiding it would cost a second search.
+    private var loadedDeferredTools: Set<String> = []
+    /// Set by a `toolSearch` call, cleared once the model has been rebuilt with
+    /// what it found. See `reconfigureMidRun`.
+    private var deferredToolsChanged = false
     private let createdAt = Date()
 
     /// Turns replayed ahead of the transcript. Compaction puts the summary here
     /// rather than in `messages`, so the model keeps the thread while the user
     /// sees one tidy note instead of the conversation it replaced.
     private var historyPrefix: [ChatTurn] = []
+
+    /// First message index replayed to the backend. Non-zero only under
+    /// `ContextPolicy.Overflow.slidingWindow`, where the transcript stays whole
+    /// on screen and only its tail is sent.
+    private var replayStart = 0
 
     // MARK: - Init
 
@@ -143,11 +158,28 @@ public final class ChatSession {
             return
         }
 
-        guard !isStreaming else { return }
+        guard !isStreaming else {
+            switch configuration.inFlightInputPolicy {
+            case .reject:
+                return
+            case .queue:
+                messages.append(.user(text, attachments: attachments))
+                queuedInputs.append((text, attachments))
+                save()
+                return
+            case .interrupt:
+                messages.append(.user(text, attachments: attachments))
+                queuedInputs.insert((text, attachments), at: 0)
+                save()
+                stop()
+                return
+            }
+        }
         messages.append(.user(text, attachments: attachments))
         if title == "New chat" {
             title = ChatHistoryStore.derivedTitle(from: messages)
         }
+        save()
         startRun(userText: text, attachments: attachments)
     }
 
@@ -352,7 +384,7 @@ public final class ChatSession {
             modelIsWorking = false
         }
 
-        let transcript = compactionTranscript()
+        let transcript = await compactionTranscript()
         guard !transcript.isEmpty else { return }
 
         do {
@@ -376,6 +408,7 @@ public final class ChatSession {
                 .model("Understood — I'll continue from that context."),
             ]
             messages = [.note("**Conversation compacted.**\n\n\(text)")]
+            replayStart = 0
             todos = []
             lastTurnUsage = .zero
             configuredFingerprint = nil
@@ -385,10 +418,28 @@ public final class ChatSession {
         }
     }
 
+    /// Advances the replay window past the oldest turns.
+    ///
+    /// Nothing is removed from `messages`: the user keeps the whole
+    /// conversation, and only what the backend is shown shrinks. The window
+    /// starts at a user message so the tail reads as a conversation rather than
+    /// as a reply to something the model can no longer see.
+    private func slideWindow() {
+        let retained = max(1, Int(Double(messages.count) * configuration.context.retainedFraction))
+        var start = messages.count - retained
+        guard start > replayStart else { return }
+        while start < messages.count, messages[start].role != .user { start += 1 }
+        guard start < messages.count else { return }
+
+        replayStart = start
+        lastTurnUsage = .zero
+        configuredFingerprint = nil
+    }
+
     /// The transcript as the summarizer should read it. Tool *results* are left
     /// out deliberately — they are the bulk of what compaction exists to shed,
     /// and the calls alone record what was done.
-    private func compactionTranscript() -> String {
+    private func compactionTranscript() async -> String {
         var out = ""
         for message in messages {
             switch message.role {
@@ -399,8 +450,25 @@ public final class ChatSession {
                 out += "\(prefix): \(message.content)\n\n"
             case .toolCall(let name):
                 out += "Tool call: \(name)\n"
-            case .toolResult:
-                continue
+            case .toolResult(let name):
+                guard let provider = await provider(for: name) else { continue }
+                switch await provider.resultRetention(for: ToolCall(id: message.callID ?? UUID().uuidString,
+                                                                     name: name)) {
+                case .discard:
+                    continue
+                case .summarize:
+                    let status = message.rawResult?["error"] == nil ? "succeeded" : "failed"
+                    out += "Tool result: \(name) \(status)\n"
+                case .retain:
+                    if let payload = message.rawResult {
+                        out += "Tool result: \(name) \(ChatValue.object(payload).jsonString())\n"
+                    }
+                case .retainFields(let fields):
+                    if let payload = message.rawResult {
+                        let retained = payload.filter { fields.contains($0.key) }
+                        out += "Tool result: \(name) \(ChatValue.object(retained).jsonString())\n"
+                    }
+                }
             }
         }
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -419,6 +487,7 @@ public final class ChatSession {
         title = "New chat"
         configuredFingerprint = nil
         historyPrefix = []
+        replayStart = 0
     }
 
     /// Restores a persisted transcript. Turns that were saved without their raw
@@ -435,6 +504,7 @@ public final class ChatSession {
         // A loaded transcript brings its own history; anything a previous
         // compaction seeded belongs to the session being replaced.
         historyPrefix = []
+        replayStart = 0
         if let path = stored.workingDirectoryPath {
             workingDirectory = URL(fileURLWithPath: path)
         }
@@ -476,6 +546,107 @@ public final class ChatSession {
         configuredFingerprint = nil
     }
 
+    // MARK: - Host edits to the transcript
+
+    /// Drops `index` and everything after it, so the host can re-run an edited
+    /// message. The model is marked stale because the history it was configured
+    /// with no longer matches what is on screen.
+    public func truncate(from index: Int) {
+        guard !isStreaming, messages.indices.contains(index) else { return }
+        messages.removeSubrange(index...)
+        replayStart = min(replayStart, messages.count)
+        configuredFingerprint = nil
+    }
+
+    /// Shows `text` to the user without telling the model — the same treatment
+    /// slash-command feedback gets. For host-side notices like "directory
+    /// added" that would otherwise read as something the assistant said.
+    public func appendNote(_ text: String) {
+        messages.append(.note(text))
+    }
+
+    /// Surfaces a host-side failure in the same place the session shows its own.
+    public func reportError(_ message: String) {
+        error = message
+    }
+
+    /// Adds or removes a tool provider on a live session.
+    ///
+    /// Providers whose tools should appear only in a mode — research, say — are
+    /// added and removed rather than left in place and filtered: a model that
+    /// can see a tool will eventually call it.
+    public func setToolProvider(_ provider: any ToolProvider, enabled: Bool) {
+        let existing = configuration.toolProviders.firstIndex { $0 === provider }
+        if enabled {
+            guard existing == nil else { return }
+            configuration.toolProviders.append(provider)
+            permissions.addAutoAllowed(provider.autoAllowedToolNames)
+            let url = workingDirectory
+            Task { await provider.workingDirectoryChanged(to: url) }
+        } else if let existing {
+            configuration.toolProviders.remove(at: existing)
+        } else {
+            return
+        }
+        configuredFingerprint = nil
+    }
+
+    /// Registers a host command after init, for one that needs to call back
+    /// into the object that owns the session.
+    public func registerCommand(_ command: SlashCommand) {
+        configuration.slashCommands.custom.removeAll { $0.name == command.name }
+        configuration.slashCommands.custom.append(command)
+    }
+
+    // MARK: - Reconfiguration
+
+    /// Swaps the model this session talks to, keeping the transcript.
+    ///
+    /// The next run replays the existing history into the new backend, so a
+    /// mid-conversation model change continues the thread rather than starting
+    /// over. Refused while streaming: the in-flight turn belongs to the backend
+    /// that started it.
+    @discardableResult
+    public func setBackend(_ backend: any ChatBackend) -> Bool {
+        guard !isStreaming else { return false }
+        configuration.backend = backend
+        configuredFingerprint = nil
+        return true
+    }
+
+    /// Replaces the context pruning and compaction policy.
+    public func setContextPolicy(_ policy: ContextPolicy) {
+        configuration.context = policy
+    }
+
+    /// Identifier of the model currently in use.
+    public var modelName: String {
+        get async { await configuration.backend.modelName }
+    }
+
+    /// Replaces the host-supplied prompt sections. Marks the model stale, so
+    /// the new sections reach it on the next run rather than the one after.
+    public func setAdditionalSections(_ sections: [String]) {
+        guard sections != configuration.additionalSections else { return }
+        configuration.additionalSections = sections
+        configuredFingerprint = nil
+    }
+
+    /// Replaces the instructions read from the working directory.
+    public func setProjectContext(_ text: String, title: String? = nil) {
+        guard text != configuration.projectContext || title != nil else { return }
+        configuration.projectContext = text
+        if let title { configuration.projectContextTitle = title }
+        configuredFingerprint = nil
+    }
+
+    /// Forces a rebuild of the system prompt and tool list before the next turn.
+    /// Needed when something the session cannot observe changes — an MCP server
+    /// finishing its handshake, say.
+    public func invalidateModel() {
+        configuredFingerprint = nil
+    }
+
     // MARK: - Model configuration
 
     private var promptContext: SystemPromptContext {
@@ -493,6 +664,18 @@ public final class ChatSession {
     /// an MCP server connecting mid-conversation — move this, which is why
     /// providers report a `declarationsVersion`.
     private func currentTools() async -> [ToolDeclaration] {
+        let all = await allDeclarations()
+        guard !configuration.deferredToolNames.isEmpty else { return all }
+
+        let hidden = all.filter { isHidden($0.name) }
+        var visible = all.filter { !isHidden($0.name) }
+        // No point offering a search once everything has been found.
+        if !hidden.isEmpty { visible.append(AgentTools.toolSearchDeclaration) }
+        return visible
+    }
+
+    /// Every tool that exists, before deferral hides any of them.
+    private func allDeclarations() async -> [ToolDeclaration] {
         var tools: [ToolDeclaration] = []
         for provider in configuration.toolProviders {
             tools += await provider.declarations
@@ -505,6 +688,11 @@ public final class ChatSession {
         return tools
     }
 
+    /// Deferred and not yet found.
+    private func isHidden(_ name: String) -> Bool {
+        configuration.deferredToolNames.contains(name) && !loadedDeferredTools.contains(name)
+    }
+
     private func reconfigureIfNeeded() async {
         let tools = await currentTools()
         var versions = ""
@@ -515,6 +703,7 @@ public final class ChatSession {
             SystemPromptBuilder.fingerprint(promptContext),
             tools.map(\.name).joined(separator: ","),
             versions,
+            loadedDeferredTools.sorted().joined(separator: ","),
         ].joined(separator: "|")
 
         guard fingerprint != configuredFingerprint else { return }
@@ -531,136 +720,404 @@ public final class ChatSession {
         isStreaming = true
         modelIsWorking = true
         error = nil
-        let started = Date()
+        let started = ContinuousClock.now
+        let startedDate = Date()
+        let runID = UUID()
 
-        var runUsage = TokenUsage.zero
-        var toolsCalled: [String] = []
+        var state = AgentRunState(input: .message(userText, attachments: attachments ?? []))
         var outcome = ChatRunOutcome.completed
-        var turn = 0
+        var completionValidationAttempts = 0
 
         await reconfigureIfNeeded()
 
-        var input = TurnInput.message(userText, attachments: attachments ?? [])
+        agentLoop: while state.turn < configuration.budget.maxTurns {
+            if Task.isCancelled {
+                outcome = .stopped
+                await recordTransition(runID: runID, state: state, termination: .stopped)
+                break
+            }
+            if configuration.budget.isExceeded(by: state.usage) {
+                outcome = .budgetExceeded
+                await recordTransition(runID: runID, state: state, termination: .tokenBudget)
+                break
+            }
+            if let maximumDuration = configuration.budget.maximumDuration,
+               started.duration(to: .now) >= maximumDuration {
+                outcome = .budgetExceeded
+                await recordTransition(runID: runID, state: state, termination: .durationBudget)
+                break
+            }
 
-        while turn < configuration.maxTurns {
-            if Task.isCancelled { outcome = .stopped; break }
-
-            // Every turn starts with the model thinking again: the previous
-            // turn's text stopped the indicator, and this one has produced none.
             modelIsWorking = true
-
             let assistantID = openAssistantMessage()
-            var calls: [ToolCall] = []
-            var finish: FinishReason?
-            // Gemini and friends report usage cumulatively per chunk, so the
-            // last value seen is the turn's total — summing them would multiply it.
-            var turnUsage: TokenUsage?
+            await Task.yield()
+            let observation: TurnObservation
 
             do {
-                for try await chunk in configuration.backend.stream(input) {
-                    if Task.isCancelled { break }
-                    switch chunk {
-                    case .text(let delta):
-                        modelIsWorking = false
-                        appendText(delta, to: assistantID)
-                    case .toolCall(let call):
-                        calls.append(call)
-                    case .usage(let value):
-                        turnUsage = value
-                    case .finish(let reason):
-                        finish = reason
-                    }
-                }
+                observation = try await streamTurnWithRetry(state.input,
+                                                            assistantID: assistantID,
+                                                            runID: runID,
+                                                            state: state)
             } catch {
-                let message = error.localizedDescription
-                if !Task.isCancelled {
+                let failure = BackendFailure.classify(error)
+                if case .contextOverflow = failure, !state.contextRecoveryAttempted {
+                    finishAssistantMessage(assistantID, note: nil)
+                    state.contextRecoveryAttempted = true
+                    state.continuation = .contextRecovery
+                    await recordTransition(runID: runID, state: state, reason: .contextRecovery)
+                    if await compactForRecovery() { continue }
+                }
+
+                let message = failure.localizedDescription
+                if failure == .cancelled || Task.isCancelled {
+                    outcome = .stopped
+                    finishAssistantMessage(assistantID, note: nil)
+                    await recordTransition(runID: runID, state: state, termination: .stopped)
+                } else {
                     self.error = message
                     outcome = .failed(message)
                     finishAssistantMessage(assistantID, note: "Error: \(message)")
-                } else {
-                    outcome = .stopped
-                    finishAssistantMessage(assistantID, note: nil)
+                    await recordTransition(runID: runID, state: state,
+                                           termination: .backendFailure(message))
                 }
                 break
             }
 
-            if let value = turnUsage {
+            if let value = observation.usage {
                 usage = usage + value
-                runUsage = runUsage + value
+                state.usage = state.usage + value
                 lastTurnUsage = value
             }
 
-            let note = finish?.userFacingNote
-            finishAssistantMessage(assistantID, note: note)
+            let abnormalNote = observation.finish?.userFacingNote
+            let recoverOutput = observation.calls.isEmpty
+                && observation.finish == .maxTokens
+                && state.outputRecoveryCount < configuration.maximumOutputRecoveries
 
-            if Task.isCancelled { outcome = .stopped; break }
+            finishAssistantMessage(assistantID, note: recoverOutput ? nil : abnormalNote)
 
-            // A blocked or truncated turn ends the run: continuing would feed
-            // the model back a half-turn it never finished.
-            if let note, calls.isEmpty {
-                error = note
-                outcome = .failed(note)
+            if Task.isCancelled {
+                outcome = .stopped
+                await recordTransition(runID: runID, state: state, termination: .stopped)
                 break
             }
 
-            // No tool calls means the model answered — that's the run.
-            guard !calls.isEmpty else { break }
+            if recoverOutput {
+                state.outputRecoveryCount += 1
+                state.input = .message("""
+                Continue directly from where the response was cut off. Do not apologize or recap. \
+                Complete the remaining work in smaller sections.
+                """)
+                state.continuation = .outputLimitRecovery(attempt: state.outputRecoveryCount)
+                await recordTransition(runID: runID, state: state,
+                                       reason: state.continuation)
+                continue
+            }
 
-            toolsCalled += calls.map(\.name)
-            // Tools produce no text, so the indicator carries the whole wait.
+            if let abnormalNote, observation.calls.isEmpty {
+                error = abnormalNote
+                outcome = .failed(abnormalNote)
+                await recordTransition(runID: runID, state: state,
+                                       termination: .backendFailure(abnormalNote))
+                break
+            }
+
+            if observation.calls.isEmpty {
+                let decision = await validateCompletion(state)
+                switch decision {
+                case .accept:
+                    await recordTransition(runID: runID, state: state, termination: .completed)
+                    break agentLoop
+                case .continueWithFeedback(let feedback)
+                    where completionValidationAttempts < configuration.maximumCompletionValidationAttempts:
+                    completionValidationAttempts += 1
+                    state.input = .message(feedback)
+                    state.continuation = .completionFeedback
+                    await recordTransition(runID: runID, state: state, reason: .completionFeedback)
+                    continue
+                case .continueWithFeedback(let feedback), .reject(let feedback):
+                    error = feedback
+                    outcome = .failed(feedback)
+                    await recordTransition(runID: runID, state: state,
+                                           termination: .completionRejected(feedback))
+                    break agentLoop
+                }
+            }
+
+            state.toolsCalled += observation.calls.map(\.name)
             modelIsWorking = true
-            let results = await execute(calls)
+            let execution = await execute(observation.calls,
+                                          turn: state.turn,
+                                          prestarted: observation.prestartedTools)
+            if execution.stopReason != nil {
+                let reason = execution.stopReason ?? "A tool hook stopped the run."
+                error = reason
+                outcome = .failed(reason)
+                await recordTransition(runID: runID, state: state,
+                                       termination: .completionRejected(reason))
+                break
+            }
 
-            if Task.isCancelled { outcome = .stopped; break }
+            if Task.isCancelled {
+                outcome = .stopped
+                await recordTransition(runID: runID, state: state, termination: .stopped)
+                break
+            }
 
-            input = .toolResults(results)
-            turn += 1
+            state.input = .toolResults(execution.results)
+            state.turn += 1
+            state.outputRecoveryCount = 0
+            state.contextRecoveryAttempted = false
+            state.continuation = .toolResults
+            await recordTransition(runID: runID, state: state,
+                                   reason: .toolResults,
+                                   toolCallIDs: observation.calls.map(\.id))
+
+            if deferredToolsChanged {
+                deferredToolsChanged = false
+                await reconfigureMidRun()
+            }
         }
 
-        if turn >= configuration.maxTurns {
+        if state.turn >= configuration.budget.maxTurns {
             outcome = .turnLimitReached
             appendTurnLimitNote()
+            await recordTransition(runID: runID, state: state, termination: .turnLimit)
         }
 
         isStreaming = false
         modelIsWorking = false
         finalizeStreamingMessages()
-
-        // A run that stopped or failed part-way can leave the backend holding a
-        // model turn whose tool calls were never answered — it committed the
-        // turn, then the loop unwound before the results were sent. Every send
-        // after that is rejected, so the next run rebuilds history from the
-        // transcript, where `replayableTurns` answers each call.
         if outcome != .completed { configuredFingerprint = nil }
-
         save()
 
         await recordTelemetry(userText: userText,
-                              toolsCalled: toolsCalled,
-                              usage: runUsage,
-                              turns: turn,
-                              started: started)
+                              toolsCalled: state.toolsCalled,
+                              usage: state.usage,
+                              turns: state.turn,
+                              started: startedDate)
 
-        // After the answer is delivered, never before. Compacting on the way in
-        // would fold the message the user just typed into the summary and then
-        // answer it out of a transcript they can no longer see. Doing it here
-        // means the next turn starts from a small history instead.
-        //
-        // Ahead of `onRunFinished` so that by the time a host is told the run
-        // ended, the transcript it is about to read has stopped moving.
         if outcome == .completed,
            configuration.context.shouldCompact(afterPromptTokens: lastTurnUsage.prompt) {
-            await compact()
+            switch configuration.context.overflow {
+            case .compact:       await compact()
+            case .slidingWindow: await slideWindowToBudget()
+            }
         }
 
         configuration.onRunFinished?(outcome)
+        startNextQueuedInputIfNeeded()
+    }
+
+    private struct TurnObservation {
+        var calls: [ToolCall] = []
+        var finish: FinishReason?
+        var usage: TokenUsage?
+        var prestartedTools: [String: Task<ToolResult, Never>] = [:]
+    }
+
+    private func streamTurnWithRetry(_ input: TurnInput,
+                                     assistantID: UUID,
+                                     runID: UUID,
+                                     state: AgentRunState) async throws -> TurnObservation {
+        let originalText = messages.first(where: { $0.id == assistantID })?.content ?? ""
+        var lastFailure: BackendFailure = .permanent("The model request failed.")
+
+        for attempt in 1...configuration.modelRetryPolicy.maxAttempts {
+            if Task.isCancelled { throw BackendFailure.cancelled }
+            resetAssistantMessage(assistantID, to: originalText)
+            var observation = TurnObservation()
+            var earlyStartOpen = configuration.toolHooks.isEmpty
+
+            do {
+                let snapshot = try await agentRunner.collect(
+                    from: configuration.backend,
+                    input: input,
+                    onChunk: { [weak self] chunk in
+                        guard let self else { return }
+                        switch chunk {
+                        case .text(let delta):
+                            self.modelIsWorking = false
+                            self.appendText(delta, to: assistantID)
+                        case .toolCall(let call):
+                            guard earlyStartOpen,
+                                  let task = await self.startStreamingToolIfSafe(call) else {
+                                earlyStartOpen = false
+                                break
+                            }
+                            observation.prestartedTools[call.id] = task
+                        case .usage, .finish:
+                            break
+                        }
+                    })
+                observation.calls = snapshot.calls
+                observation.usage = snapshot.usage
+                observation.finish = snapshot.finish
+                guard observation.finish != nil else { throw BackendFailure.incompleteStream }
+                return observation
+            } catch {
+                observation.prestartedTools.values.forEach { $0.cancel() }
+                lastFailure = BackendFailure.classify(error)
+                guard lastFailure.isRetryable,
+                      attempt < configuration.modelRetryPolicy.maxAttempts else { break }
+                configuredFingerprint = nil
+                await reconfigureIfNeeded()
+                await recordTransition(runID: runID,
+                                       state: state,
+                                       reason: .modelRetry(attempt: attempt))
+                try await Task.sleep(for: configuration.modelRetryPolicy.delay(forAttempt: attempt))
+            }
+        }
+
+        if let fallback = configuration.fallbackBackend, lastFailure.isRetryable {
+            configuration.backend = fallback
+            configuredFingerprint = nil
+            await reconfigureIfNeeded()
+            resetAssistantMessage(assistantID, to: originalText)
+            await recordTransition(runID: runID, state: state, reason: .modelFallback)
+            var observation = TurnObservation()
+            var earlyStartOpen = configuration.toolHooks.isEmpty
+            let snapshot = try await agentRunner.collect(
+                from: fallback,
+                input: input,
+                onChunk: { [weak self] chunk in
+                    guard let self else { return }
+                    switch chunk {
+                    case .text(let delta):
+                        self.modelIsWorking = false
+                        self.appendText(delta, to: assistantID)
+                    case .toolCall(let call):
+                        guard earlyStartOpen,
+                              let task = await self.startStreamingToolIfSafe(call) else {
+                            earlyStartOpen = false
+                            break
+                        }
+                        observation.prestartedTools[call.id] = task
+                    case .usage, .finish:
+                        break
+                    }
+                })
+            observation.calls = snapshot.calls
+            observation.usage = snapshot.usage
+            observation.finish = snapshot.finish
+            guard observation.finish != nil else { throw BackendFailure.incompleteStream }
+            return observation
+        }
+
+        throw lastFailure
+    }
+
+    private func validateCompletion(_ state: AgentRunState) async -> CompletionDecision {
+        let context = CompletionContext(messages: messages,
+                                        usage: state.usage,
+                                        toolsCalled: state.toolsCalled,
+                                        turn: state.turn)
+        for validator in configuration.completionValidators {
+            let decision = await validator.validate(context)
+            if decision != .accept { return decision }
+        }
+        return .accept
+    }
+
+    private func recordTransition(runID: UUID,
+                                  state: AgentRunState,
+                                  reason: AgentContinuationReason? = nil,
+                                  termination: AgentTerminationReason? = nil,
+                                  toolCallIDs: [String] = []) async {
+        guard let telemetry = configuration.transitionTelemetry else { return }
+        await telemetry.record(AgentTransitionEvent(runID: runID,
+                                                    iteration: state.turn,
+                                                    reason: reason,
+                                                    termination: termination,
+                                                    toolCallIDs: toolCallIDs))
+    }
+
+    private func compactForRecovery() async -> Bool {
+        let transcript = await compactionTranscript()
+        guard !transcript.isEmpty else { return false }
+        do {
+            let summary = try await configuration.backend.generate("""
+            Summarize this conversation for continuation. Preserve goals, completed work, changed \
+            files, important tool outcomes, constraints, and immediate next steps. Be dense and factual.
+
+            \(transcript)
+            """).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty else { return false }
+            historyPrefix = [
+                .user("This conversation was compacted. Here is everything so far:\n\n\(summary)"),
+                .model("Understood — I'll continue from that context."),
+            ]
+            messages.append(.note("**Context recovered by compaction.**"))
+            replayStart = messages.count
+            configuredFingerprint = nil
+            await reconfigureIfNeeded()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func slideWindowToBudget() async {
+        guard let window = configuration.context.contextWindow else {
+            slideWindow()
+            return
+        }
+        let budget = Int(Double(window) * configuration.context.compactionThreshold)
+        let retained = max(1, Int(Double(messages.count) * configuration.context.retainedFraction))
+        var start = max(min(replayStart, messages.count), messages.count - retained)
+        while start < messages.count, messages[start].role != .user { start += 1 }
+        while start < messages.count {
+            replayStart = start
+            let estimate = await configuration.tokenEstimator.estimate(replayableTurns())
+            if estimate <= budget { break }
+            start += 1
+            while start < messages.count, messages[start].role != .user { start += 1 }
+        }
+        configuredFingerprint = nil
+    }
+
+    private func startNextQueuedInputIfNeeded() {
+        guard !queuedInputs.isEmpty else { return }
+        let next = queuedInputs.removeFirst()
+        startRun(userText: next.text, attachments: next.attachments)
     }
 
     // MARK: - Tool execution
 
-    private func execute(_ calls: [ToolCall]) async -> [ToolResult] {
-        // One message per call, appended up front so the UI shows the whole
-        // batch as pending rather than revealing them one at a time.
+    private func startStreamingToolIfSafe(_ call: ToolCall) async -> Task<ToolResult, Never>? {
+        guard enabledAgentToolNames.contains(call.name) == false,
+              call.name != SkillsService.toolName,
+              permissions.requiresApproval(call.name) == false,
+              let provider = await provider(for: call.name),
+              await provider.mutatingToolNames.contains(call.name) == false,
+              await provider.executionMode(for: call) == .concurrent,
+              let declaration = await provider.declarations.first(where: { $0.name == call.name })
+        else { return nil }
+
+        guard case .success = ToolInputValidator.validate(call.arguments, against: declaration) else {
+            return nil
+        }
+        let policy = configuration.toolRetryPolicy
+        return Task {
+            await Self.executeWithRetry(call, on: provider, policy: policy)
+        }
+    }
+
+    private struct ToolExecutionOutcome {
+        var results: [ToolResult]
+        var stopReason: String?
+    }
+
+    private struct DispatchedTool: Sendable {
+        let index: Int
+        let call: ToolCall
+        let provider: any ToolProvider
+        let mode: ToolExecutionMode
+    }
+
+    private func execute(_ calls: [ToolCall],
+                         turn: Int,
+                         prestarted: [String: Task<ToolResult, Never>] = [:]) async -> ToolExecutionOutcome {
         let messageIDs = calls.map { call -> UUID in
             let message = ChatMessage.toolCall(call)
             messages.append(message)
@@ -668,45 +1125,79 @@ public final class ChatSession {
         }
 
         var results = [ToolResult?](repeating: nil, count: calls.count)
-        var dispatched: [(index: Int, call: ToolCall, provider: any ToolProvider)] = []
+        var dispatched: [DispatchedTool] = []
+        var stopReason: String?
 
-        // Sequential pass: everything that can suspend the loop or mutate
-        // session state. Running these in parallel would show the user several
-        // permission cards at once.
-        for (index, call) in calls.enumerated() {
+        for (index, originalCall) in calls.enumerated() {
             if Task.isCancelled {
-                results[index] = .failure(call, AgentRefusal.cancelled)
+                results[index] = .failure(originalCall, AgentRefusal.cancelled, kind: .cancelled)
                 cancel(messageIDs[index])
                 continue
             }
 
-            if enabledAgentToolNames.contains(call.name) {
-                results[index] = await runAgentTool(call)
+            if enabledAgentToolNames.contains(originalCall.name) {
+                results[index] = await runAgentTool(originalCall)
                 continue
             }
 
-            if call.name == SkillsService.toolName {
-                results[index] = skills.execute(call)
+            if originalCall.name == SkillsService.toolName {
+                results[index] = skills.execute(originalCall)
                 continue
             }
 
-            if let handle = call.arguments["handle"]?.stringValue,
+            if let handle = originalCall.arguments["handle"]?.stringValue,
                let compressor = configuration.compressor,
-               compressor.declarations.contains(where: { $0.name == call.name }) {
-                results[index] = await retrieve(call, handle: handle, using: compressor)
+               compressor.declarations.contains(where: { $0.name == originalCall.name }) {
+                results[index] = await retrieve(originalCall, handle: handle, using: compressor)
                 continue
             }
 
-            guard let provider = await provider(for: call.name) else {
-                results[index] = .failure(call, AgentRefusal.unhandled(call.name))
+            guard let provider = await provider(for: originalCall.name) else {
+                results[index] = .failure(originalCall, AgentRefusal.unhandled(originalCall.name),
+                                          kind: .invalidInput)
                 cancel(messageIDs[index])
                 continue
             }
 
-            // Plan mode outranks permissions: a tool the user already granted
-            // "always allow" must still be refused while planning.
+            guard let declaration = await provider.declarations.first(where: { $0.name == originalCall.name }) else {
+                results[index] = .failure(originalCall, AgentRefusal.unhandled(originalCall.name),
+                                          kind: .invalidInput)
+                cancel(messageIDs[index])
+                continue
+            }
+
+            switch ToolInputValidator.validate(originalCall.arguments, against: declaration) {
+            case .success:
+                break
+            case .failure(let validationError):
+                results[index] = .failure(originalCall,
+                                          "InputValidationError: \(validationError.localizedDescription)",
+                                          kind: .invalidInput)
+                cancel(messageIDs[index])
+                continue
+            }
+
+            var call = originalCall
+            for hook in configuration.toolHooks {
+                switch await hook.before(ToolInvocation(call: call, turn: turn)) {
+                case .proceed:
+                    continue
+                case .proceedWithArguments(let arguments):
+                    call = ToolCall(id: call.id, name: call.name, arguments: arguments)
+                case .deny(let message):
+                    results[index] = .failure(call, message, kind: .permissionDenied)
+                    cancel(messageIDs[index])
+                case .stopRun(let message):
+                    results[index] = .failure(call, message, kind: .permanent)
+                    cancel(messageIDs[index])
+                    stopReason = message
+                }
+                if results[index] != nil { break }
+            }
+            if results[index] != nil { continue }
+
             if planMode, await provider.mutatingToolNames.contains(call.name) {
-                results[index] = .failure(call, AgentRefusal.planModeBlocked)
+                results[index] = .failure(call, AgentRefusal.planModeBlocked, kind: .permissionDenied)
                 cancel(messageIDs[index])
                 continue
             }
@@ -715,49 +1206,91 @@ public final class ChatSession {
                 let card = await provider.approvalCard(for: call) ?? .generic(for: call)
                 let decision = await permissions.request(card)
                 if decision == .deny || Task.isCancelled {
-                    results[index] = .failure(call, Task.isCancelled ? AgentRefusal.cancelled
-                                                                    : AgentRefusal.denied)
+                    results[index] = .failure(call,
+                                              Task.isCancelled ? AgentRefusal.cancelled : AgentRefusal.denied,
+                                              kind: Task.isCancelled ? .cancelled : .permissionDenied)
                     cancel(messageIDs[index])
                     continue
                 }
             }
 
-            dispatched.append((index, call, provider))
+            dispatched.append(DispatchedTool(index: index,
+                                             call: call,
+                                             provider: provider,
+                                             mode: await provider.executionMode(for: call)))
         }
 
-        // Everything approved runs concurrently — independent reads and searches
-        // are the common case, and serializing them wastes most of a turn.
-        await withTaskGroup(of: (Int, ToolResult).self) { group in
-            for (index, call, provider) in dispatched {
-                group.addTask {
-                    (index, await Self.executeWithRetry(call, on: provider))
+        for item in dispatched where prestarted[item.call.id] != nil {
+            results[item.index] = await prestarted[item.call.id]?.value
+        }
+        let pending = dispatched.filter { prestarted[$0.call.id] == nil }
+
+        for batch in toolBatches(pending) {
+            if batch.first?.mode == .exclusive {
+                for item in batch {
+                    results[item.index] = await executeExternal(item, turn: turn)
                 }
-            }
-            for await (index, result) in group {
-                results[index] = result
+            } else {
+                for chunk in batch.chunked(into: configuration.maximumConcurrentTools) {
+                    await withTaskGroup(of: (Int, ToolResult).self) { group in
+                        for item in chunk {
+                            group.addTask { [toolRetryPolicy = configuration.toolRetryPolicy,
+                                             hooks = configuration.toolHooks] in
+                                let result = await Self.executeWithRetry(item.call,
+                                                                         on: item.provider,
+                                                                         policy: toolRetryPolicy)
+                                var transformed = result
+                                for hook in hooks {
+                                    transformed = await hook.after(
+                                        ToolInvocation(call: item.call, turn: turn),
+                                        result: transformed)
+                                }
+                                return (item.index, transformed)
+                            }
+                        }
+                        for await (index, result) in group { results[index] = result }
+                    }
+                }
             }
         }
 
         var final = zip(calls, results).map { call, result in
-            result ?? .failure(call, AgentRefusal.cancelled)
+            result ?? .failure(call, AgentRefusal.cancelled, kind: .cancelled)
         }
 
         if let compressor = configuration.compressor {
             final = await compress(final, using: compressor)
         }
-
-        // After the compressor, not before: it stores the full text and hands
-        // back a short handle, so anything still oversized here is text nobody
-        // is keeping. Truncating first would shrink what the compressor could
-        // have preserved in full.
         final = final.map(configuration.context.truncating)
 
         for (index, result) in final.enumerated() {
             complete(messageIDs[index], failed: result.errorMessage != nil)
             messages.append(.toolResult(result))
         }
+        save()
+        return ToolExecutionOutcome(results: final, stopReason: stopReason)
+    }
 
-        return final
+    private func toolBatches(_ tools: [DispatchedTool]) -> [[DispatchedTool]] {
+        var batches: [[DispatchedTool]] = []
+        for tool in tools {
+            if tool.mode == .concurrent, batches.last?.first?.mode == .concurrent {
+                batches[batches.count - 1].append(tool)
+            } else {
+                batches.append([tool])
+            }
+        }
+        return batches
+    }
+
+    private func executeExternal(_ item: DispatchedTool, turn: Int) async -> ToolResult {
+        var result = await Self.executeWithRetry(item.call,
+                                                 on: item.provider,
+                                                 policy: configuration.toolRetryPolicy)
+        for hook in configuration.toolHooks {
+            result = await hook.after(ToolInvocation(call: item.call, turn: turn), result: result)
+        }
+        return result
     }
 
     private func provider(for name: String) async -> (any ToolProvider)? {
@@ -767,17 +1300,46 @@ public final class ChatSession {
         return nil
     }
 
-    /// One retry on what looks like a transient network failure. Tool errors are
-    /// data the model reads, so a flaky connection would otherwise become a
-    /// wrong answer rather than a retried call.
     private static func executeWithRetry(_ call: ToolCall,
-                                         on provider: any ToolProvider) async -> ToolResult {
-        let result = await provider.execute(call)
-        guard let message = result.errorMessage,
-              ["URLError", "network", "connection", "timed out"]
-                  .contains(where: { message.localizedCaseInsensitiveContains($0) })
-        else { return result }
-        return await provider.execute(call)
+                                         on provider: any ToolProvider,
+                                         policy: RetryPolicy) async -> ToolResult {
+        let safety = await provider.retrySafety(for: call)
+        let timeout = await provider.timeout(for: call)
+        var last = ToolResult.failure(call, "Tool execution failed.", kind: .permanent)
+
+        for attempt in 1...policy.maxAttempts {
+            if Task.isCancelled {
+                return .failure(call, AgentRefusal.cancelled, kind: .cancelled)
+            }
+            last = await execute(call, on: provider, timeout: timeout)
+            guard last.failureKind == .transient || last.failureKind == .rateLimited else {
+                return last
+            }
+            guard attempt < policy.maxAttempts else { return last }
+            switch safety {
+            case .never:
+                return last
+            case .idempotent, .idempotencyKey:
+                try? await Task.sleep(for: policy.delay(forAttempt: attempt))
+            }
+        }
+        return last
+    }
+
+    private static func execute(_ call: ToolCall,
+                                on provider: any ToolProvider,
+                                timeout: Duration?) async -> ToolResult {
+        guard let timeout else { return await provider.execute(call) }
+        return await withTaskGroup(of: ToolResult.self, returning: ToolResult.self) { group in
+            group.addTask { await provider.execute(call) }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return .failure(call, "Tool execution timed out.", kind: .timedOut)
+            }
+            let first = await group.next() ?? .failure(call, "Tool execution failed.", kind: .permanent)
+            group.cancelAll()
+            return first
+        }
     }
 
     // MARK: - Session-owned tools
@@ -790,6 +1352,7 @@ public final class ChatSession {
         if configuration.enableTodos { names.insert(AgentTools.todoWrite) }
         if configuration.enableQuestions { names.insert(AgentTools.askUser) }
         if planMode { names.insert(AgentTools.exitPlanMode) }
+        if !configuration.deferredToolNames.isEmpty { names.insert(AgentTools.toolSearch) }
         return names
     }
 
@@ -813,6 +1376,9 @@ public final class ChatSession {
                 """)
             }
             return .success(call, ["answers": .object(answers.mapValues(ChatValue.string))])
+
+        case AgentTools.toolSearch:
+            return await runToolSearch(call)
 
         case AgentTools.exitPlanMode:
             let plan = call.arguments["plan"]?.stringValue ?? ""
@@ -840,6 +1406,67 @@ public final class ChatSession {
         default:
             return .failure(call, AgentRefusal.unhandled(call.name))
         }
+    }
+
+    /// Finds withheld tools matching the model's query and makes them callable.
+    ///
+    /// The result carries only a signature per match. The real schemas arrive
+    /// with the next request, once `reconfigureMidRun` has rebuilt the model —
+    /// sending them here as well would pay for them twice.
+    private func runToolSearch(_ call: ToolCall) async -> ToolResult {
+        let query = call.arguments["query"]?.stringValue ?? ""
+        let hidden = await allDeclarations().filter { isHidden($0.name) }
+
+        guard !hidden.isEmpty else {
+            return .success(call, ["note": .string("""
+            Every available tool is already listed in your prompt — there is nothing further to \
+            load. Don't search again; if you can't find a tool for this, say so instead.
+            """)])
+        }
+
+        let matches = DeferredToolIndex.search(query, in: hidden)
+        guard !matches.isEmpty else {
+            return .success(call, [
+                "found": .number(0),
+                "note": .string("""
+                No hidden tool matches that. The available ones are: \
+                \(hidden.map(\.name).sorted().joined(separator: ", ")). If none of them fit, this \
+                capability doesn't exist — tell the user rather than searching again.
+                """),
+            ])
+        }
+
+        loadedDeferredTools.formUnion(matches.map(\.name))
+        deferredToolsChanged = true
+
+        return .success(call, [
+            "found": .number(Double(matches.count)),
+            "tools": .string(matches.map(DeferredToolIndex.summary).joined(separator: "\n\n")),
+            "note": .string("""
+            These are now loaded and callable from your next step onwards, with their full \
+            parameter schemas. Continue with the task — don't call toolSearch again for them.
+            """),
+        ])
+    }
+
+    /// Rebuilds the model in the middle of a run, so a tool the model just found
+    /// is callable on the very next step rather than in the next conversation.
+    ///
+    /// History comes from the backend rather than `replayableTurns()`. The model
+    /// has already committed a turn whose tool calls are about to be answered,
+    /// and only the backend still holds it — rebuilding from the transcript
+    /// would drop that turn and the pending results would answer nothing.
+    private func reconfigureMidRun() async {
+        let tools = await currentTools()
+        let history = await configuration.backend.history
+        await configuration.backend.configure(
+            systemInstruction: SystemPromptBuilder.build(promptContext),
+            tools: tools,
+            history: history)
+        // The fingerprint no longer describes what the backend holds, and the
+        // history it was rebuilt from isn't the transcript's. Force the next run
+        // to configure itself from scratch.
+        configuredFingerprint = nil
     }
 
     private func retrieve(_ call: ToolCall,
@@ -889,6 +1516,11 @@ public final class ChatSession {
     private func appendText(_ delta: String, to id: UUID) {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].content += delta
+    }
+
+    private func resetAssistantMessage(_ id: UUID, to text: String) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[index].content = text
     }
 
     /// Closes a streaming bubble. A turn that produced only tool calls leaves an
@@ -972,7 +1604,7 @@ public final class ChatSession {
             }
         }
 
-        for message in messages {
+        for message in messages.dropFirst(min(replayStart, messages.count)) {
             // Local notes were never the model's words, and replaying them as
             // such makes it defend statements the host wrote.
             if message.isLocalNote { continue }

@@ -142,3 +142,65 @@ struct AutoCompactionTests {
         #expect(await backend.generatePrompts.count == 1)
     }
 }
+
+@Suite("Context policy — sliding window")
+@MainActor
+struct SlidingWindowTests {
+
+    private func turn(prompt: Int) -> [TurnChunk] {
+        [.text("answered"),
+         .usage(TokenUsage(prompt: prompt, completion: 10, total: prompt + 10)),
+         .finish(.stop)]
+    }
+
+    private func session(_ backend: MockBackend, recorder: RunRecorder) -> ChatSession {
+        ChatSession(configuration: ChatSessionConfiguration(
+            backend: backend,
+            context: .window(1_000, threshold: 0.5, overflow: .slidingWindow),
+            onRunFinished: { [recorder] outcome in recorder.record(outcome) }))
+    }
+
+    @Test("Crossing the threshold keeps the transcript and never summarizes")
+    func keepsTranscript() async {
+        let backend = MockBackend(script: [turn(prompt: 900), turn(prompt: 100)],
+                                  generated: "the summary")
+        let recorder = RunRecorder()
+        let chat = session(backend, recorder: recorder)
+
+        chat.send("first")
+        #expect(await Wait.runs(recorder))
+        chat.send("second")
+        #expect(await Wait.runs(recorder, count: 2))
+
+        // Every message is still on screen, and no summary was ever requested.
+        #expect(chat.messages.count == 4)
+        #expect(chat.messages.allSatisfy { $0.isLocalNote == false })
+        #expect(await backend.generatePrompts.isEmpty)
+    }
+
+    @Test("Only the recent tail is replayed to the backend")
+    func replaysTail() async {
+        let backend = MockBackend(script: [turn(prompt: 900), turn(prompt: 900), turn(prompt: 100)],
+                                  generated: "unused")
+        let recorder = RunRecorder()
+        let chat = session(backend, recorder: recorder)
+
+        chat.send("the oldest message")
+        #expect(await Wait.runs(recorder))
+        chat.send("the middle message")
+        #expect(await Wait.runs(recorder, count: 2))
+        chat.send("the newest message")
+        #expect(await Wait.runs(recorder, count: 3))
+
+        // The window slid once the transcript was long enough to have a tail,
+        // so the last send configured history without the opening message.
+        let replayed = await backend.configuredHistory
+        let texts = replayed.flatMap { turn in
+            turn.parts.compactMap { part -> String? in
+                if case .text(let text) = part { return text }
+                return nil
+            }
+        }
+        #expect(!texts.contains("the oldest message"))
+    }
+}

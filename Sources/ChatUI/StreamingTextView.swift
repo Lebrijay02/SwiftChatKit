@@ -157,7 +157,7 @@ public struct StreamingTextView: View {
                         .frame(maxWidth: .infinity, alignment: .topLeading)
 
                 case .code(_, let language, let code):
-                    MarkdownCodeBlockView(language: language, code: code)
+                    MarkdownCodeBlockViewHighlighted(language: language, code: code)
                 }
             }
         }
