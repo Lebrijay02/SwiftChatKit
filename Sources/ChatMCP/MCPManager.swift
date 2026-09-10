@@ -107,8 +107,8 @@ public actor MCPManager: ToolProvider {
         onProgress = observer
     }
 
-    public func workingDirectoryChanged(to url: URL?) async {
-        workingDirectory = url
+    public func directoryScopeChanged(to scope: DirectoryScope) async {
+        workingDirectory = scope.root
     }
 
     // MARK: - Server list

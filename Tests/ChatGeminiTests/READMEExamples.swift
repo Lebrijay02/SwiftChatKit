@@ -55,7 +55,7 @@ private struct MyTelemetry: ChatTelemetry {
 }
 
 @MainActor
-private func readmeQuickstart(projectURL: URL, data: Data, storedSession: StoredSession) {
+private func readmeQuickstart(projectURL: URL, data: Data, storedSession: StoredSession) async {
     // The minimal configuration from the top of "## Quickstart".
     _ = ChatSession(configuration: ChatSessionConfiguration(
         backend: GeminiBackend(GeminiBackendConfig(model: .gemini3_5Flash))))
@@ -93,5 +93,7 @@ private func readmeQuickstart(projectURL: URL, data: Data, storedSession: Stored
     session.newChat()
     session.load(storedSession)
     session.save()
-    session.workingDirectory = projectURL
+    await session.setWorkingDirectory(projectURL)
+    await session.addDirectory(projectURL.appendingPathComponent("../SharedKit"))
+    _ = (session.workingDirectoryIsLocked, session.directories.all)
 }

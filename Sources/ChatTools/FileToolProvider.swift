@@ -238,9 +238,8 @@ public final class FileToolProvider: ToolProvider {
         Self.allDeclarations.contains { $0.name == name }
     }
 
-    public func workingDirectoryChanged(to url: URL?) async {
-        guard let url else { return }
-        await fileSystem.setCurrentDirectory(url)
+    public func directoryScopeChanged(to scope: DirectoryScope) async {
+        await fileSystem.setScope(scope)
     }
 
     // MARK: - Approval

@@ -26,13 +26,20 @@ what you wired up.
 | Todo checklist, plan mode | `ChatCore` |
 | Protocol seams (`ChatBackend`, `ToolProvider`, …) | `ChatCore` |
 | Agent Skills discovery | `ChatCore` |
+| Slash commands (`/clear`, `/compact`, …) | `ChatCore` |
+| `ContextPolicy` — compaction and sliding window | `ChatCore` |
+| `AgentBudget`, `RetryPolicy`, `BackendFailure` | `ChatCore` |
+| `ToolHook`, `CompletionValidator` | `ChatCore` |
+| Deferred tools and `toolSearch` | `ChatCore` |
+| `DirectoryScope` | `ChatCore` |
 | Transcript persistence | `ChatCore` |
 | System-prompt assembly | `ChatCore` |
 | `ChatSession` agent loop | `ChatCore` |
 | Gemini backend | `ChatGemini` |
 | OpenAI-compatible backend | `ChatOpenAI` |
 | File + shell tool providers | `ChatTools` |
-| MCP client and manager | `ChatMCP` |
+| Background process manager | `ChatTools` |
+| MCP client, manager and OAuth provider | `ChatMCP` |
 | SwiftUI Markdown renderer, agent cards | `ChatUI` |
 
 Every code sample in this README is compile-checked by
@@ -140,6 +147,12 @@ let session = ChatSession(configuration: ChatSessionConfiguration(
     persona: .codingAgent,
     workingDirectory: projectURL,
     skills: .claudeCompatible,
+    // `/clear`, `/compact`, `/plan`, `/new`, `/add-dir`, `/help`, plus skills
+    // as commands. Defaults to `.disabled` — `/` is just a character.
+    slashCommands: .standard,
+    // Summarize the conversation at 75% of a 1M-token window rather than
+    // letting the provider reject the next request. Defaults to `.unbounded`.
+    context: .window(1_000_000),
     maxTurns: 100,
     enableTodos: true,
     enableQuestions: true,
@@ -176,8 +189,33 @@ session.regenerate()        // redo the last user message
 session.newChat()
 session.load(storedSession)
 session.save()
-session.workingDirectory = url   // rescans project-local skills
+await session.compact()     // summarize now, without waiting for the threshold
+session.availableCommands   // [SlashCommand] — drive a `/` autocomplete menu
+
+await session.setWorkingDirectory(url)  // empty transcript only; rescans skills
+await session.addDirectory(sharedKit)   // any time; widens what tools may reach
+session.workingDirectoryIsLocked        // true from the first message onward
+session.directories.all                 // root first, then the additions
 ```
+
+## Directories
+
+A conversation picks a working directory while its transcript is still empty and
+keeps it for life. Relative paths resolve against it, so letting it move
+mid-conversation would silently repoint every path already in the transcript.
+`setWorkingDirectory` returns `false` once `workingDirectoryIsLocked` is true.
+
+Widening is always allowed, because adding a directory cannot change what an
+existing path means. `addDirectory` does it in code and `/add-dir <path>` does it
+from the chat. Both the root and the additions are persisted with the transcript,
+so a reopened conversation can still reach everything it could before.
+
+The model is told the list in its system prompt, and the file tools refuse any
+path outside it — `LocalFileSystem` resolves first and then checks, so `../..`
+out of the project is caught the same way an absolute path is. Shell commands are
+*not* sandboxed this way: `ShellToolProvider` starts them in the root, but a
+command is free to `cd` elsewhere, so the permission prompts remain the gate
+there.
 
 ---
 
@@ -796,6 +834,118 @@ Behaviours worth knowing, because they are what the loop's tests pin down:
   assembled tool list and each provider's `declarationsVersion` form a
   fingerprint; an unchanged fingerprint skips the re-upload.
 
+### Budgets and stopping
+
+`maxTurns` caps iterations, but a loop can also burn a context window or an
+afternoon inside that cap. `AgentBudget` bounds the other two axes, and is
+checked at the top of every iteration:
+
+```swift
+let budget = AgentBudget(maxTurns: 100,
+                         maxTotalTokens: 500_000,
+                         maximumDuration: .seconds(300))
+```
+
+Exceeding any of them ends the run with `ChatRunOutcome.budgetExceeded`, which
+arrives at `onRunFinished` like any other outcome.
+
+### Failure handling and recovery
+
+Backend errors are classified into `BackendFailure` rather than surfaced raw,
+because the loop's response depends on the kind:
+
+| Failure | What the loop does |
+|---|---|
+| `.rateLimited`, `.overloaded`, `.connection`, `.timeout`, `.incompleteStream` | Retried per `modelRetryPolicy`, then a `fallbackBackend` if one is set |
+| `.contextOverflow` | Compacts once and retries the same turn |
+| `.cancelled` | Ends the run as `.stopped`, no error shown |
+| `.authentication`, `.safety`, `.invalidRequest`, `.permanent` | Ends the run; retrying cannot help |
+
+The retryable set is `BackendFailure.isRetryable`, and a retry re-uploads the
+model first — a provider that dropped the session is the common cause, and
+resending the same turn against a session it no longer has just fails again.
+
+Two more recoveries are not error-shaped at all. A turn that stopped at the
+output-token limit is continued with a "pick up where you left off" prompt, up
+to `maximumOutputRecoveries` times. And a run that switched to the fallback
+backend switches back before the next one, so a transient outage does not
+silently pin the session to the cheaper model forever.
+
+Tool failures never propagate: they become `ToolResult`s the model reads and
+recovers from, retried per `toolRetryPolicy` — but only when the provider
+reports the call as `.idempotent`, because retrying a write is not a free action.
+
+### Tool hooks
+
+A `ToolHook` sits between the model's call and the provider's execution. This is
+the seam for audit logging, argument rewriting and policy that isn't per-tool
+enough to belong in a provider:
+
+```swift
+struct BlockProductionWrites: ToolHook {
+    func before(_ invocation: ToolInvocation) async -> ToolHookDecision {
+        guard invocation.call.name == "writeFile",
+              invocation.call.arguments["path"]?.stringValue?.contains("/prod/") == true
+        else { return .proceed }
+        return .deny("Production paths are read-only in this session.")
+    }
+}
+```
+
+`.deny` reports back to the model, which keeps working; `.stopRun` ends the run
+outright. `.proceedWithArguments` rewrites the call — useful for injecting a
+tenant ID the model has no business knowing. `after(_:result:)` gets the last
+word on the result before it reaches the transcript.
+
+### Completion validators
+
+By default a turn with no tool calls means the model is done. A
+`CompletionValidator` gets to disagree:
+
+```swift
+struct MustRunTests: CompletionValidator {
+    func validate(_ context: CompletionContext) async -> CompletionDecision {
+        context.toolsCalled.contains("runTests")
+            ? .accept
+            : .continueWithFeedback("Run the test suite before reporting this as finished.")
+    }
+}
+```
+
+`.continueWithFeedback` sends the string as the next prompt and the loop keeps
+going, up to `maximumCompletionValidationAttempts` — after which the feedback
+becomes the run's error rather than a prompt, so a validator that can never be
+satisfied stops the run instead of spinning it.
+
+### Deferred tools
+
+A large MCP server or a broad in-house provider can put dozens of schemas in
+every request, most of them irrelevant to any given task. Naming a tool in
+`deferredToolNames` withholds its schema and adds a `toolSearch` tool the model
+uses to find it in plain words:
+
+```swift
+deferredToolNames: ["createXcodeProject", "indexWorkspace", "runMigration"]
+```
+
+The search returns compact signatures rather than full schemas — spending a full
+JSON Schema there would pay the cost deferral exists to avoid. Anything found is
+promoted to the real tool list and the model is reconfigured mid-run, so it
+becomes callable on the very next step. Once every deferred tool has been found,
+`toolSearch` itself stops being offered.
+
+### Transition telemetry
+
+`AgentTransitionTelemetry` receives an `AgentTransitionEvent` at every decision
+point in the loop — each continuation reason and the final termination reason,
+with the run ID and iteration number. It exists because "the run took 14 turns"
+is not a debuggable fact, while "turns 3–9 were `.outputLimitRecovery` and it
+terminated on `.turnLimit`" is.
+
+This is separate from `ChatTelemetry`, which fires once per run with the
+user-facing summary. Both are fire-and-forget: the session never waits on either
+and never surfaces their failures.
+
 ### Tools the session owns
 
 Three tools act on the session's own state, so they are implemented by the
@@ -840,6 +990,107 @@ unanswered call (it would make the next send invalid).
 
 ---
 
+## Context and compaction
+
+An agentic loop grows its history without limit. Every tool result stays in the
+transcript so the model can refer back to it, and a handful of large file reads
+can carry more text than everything the user typed all session. Left alone this
+ends one way: the provider rejects the next request for exceeding the window,
+and because *every* subsequent request carries the same oversized history, the
+conversation is stuck with no escape but throwing it away.
+
+`ContextPolicy` is the bound. It defaults to `.unbounded` — silently rewriting a
+host's transcript is not something to opt anyone into by surprise — so this is
+one of the few knobs worth setting deliberately:
+
+```swift
+context: .window(1_000_000)                       // compact at 75%
+context: .window(200_000, threshold: 0.6)         // compact earlier
+context: .window(200_000, overflow: .slidingWindow)
+context: ContextPolicy(contextWindow: 200_000, maxToolResultCharacters: 50_000)
+```
+
+The window size is stated rather than detected, because there is no portable way
+to ask a backend for it and guessing wrong is worse than not guessing: too high
+and the policy never fires, too low and the session compacts a conversation with
+plenty of room left.
+
+Two independent mechanisms:
+
+- **`maxToolResultCharacters`** caps what any single tool result contributes,
+  replacing the overflow with a marker that says so. The marker is in the
+  payload rather than the log, because the model is the one that needs to know
+  it is looking at a fragment — otherwise it reports confidently on a file whose
+  second half it never saw. This is the blunt backstop; a `ContextCompressor` is
+  the better answer, since it keeps the content retrievable instead of dropping it.
+- **`compactionThreshold`** fires after a turn whose reported prompt tokens
+  cross the line. Well below 1.0 on purpose: the margin has to cover everything
+  the next turn might add before it is checked again.
+
+`overflow` picks what happens then. `.compact` asks the model to summarize the
+conversation and continues from the summary — meaning preserved, detail lost.
+`.slidingWindow` keeps the full transcript on screen but replays only the recent
+`retainedFraction` of it — detail preserved for the turns it keeps, the rest
+dropped outright. Neither is right for every host, and the choice is often the
+user's, which is why it is a setting and not a decision this package makes.
+
+Compaction also runs as a recovery: a `.contextOverflow` from the backend
+triggers one compaction and one retry of the same turn, once per turn, so a host
+that never set a window still gets one chance to survive rather than a dead
+conversation. `await session.compact()` invokes it on demand, and a failed
+compaction leaves the conversation exactly as it was.
+
+## Slash commands
+
+Leading-slash input the session answers itself instead of sending to the model.
+Off by default (`.disabled`), so `/` is just a character until you say otherwise:
+
+```swift
+slashCommands: .standard   // every built-in, plus skills as commands
+```
+
+| Command | Effect |
+|---|---|
+| `/clear` | Delete this conversation and start over |
+| `/compact` | Summarize the conversation to free up context |
+| `/plan` | Toggle plan mode |
+| `/new` | Save this conversation and open a new one |
+| `/add-dir <path>` | Widen what the conversation can reach |
+| `/help` | List the available commands |
+
+Built-ins are opt-in individually, so a host that wants `/clear` but not
+`/compact` does not have to reimplement either:
+
+```swift
+slashCommands: SlashCommandsConfiguration(builtIns: [.clear, .help])
+```
+
+A custom command reports what it wants done rather than doing it, for the same
+reason a `ToolProvider` returns a `ToolResult` instead of mutating the
+transcript — a host can add one without a reference back to the session:
+
+```swift
+let review = SlashCommand(name: "review", summary: "Review the working tree") { context in
+    .prompt("Review the uncommitted changes in \(context.workingDirectory?.path ?? "."). \(context.arguments)")
+}
+```
+
+`.prompt` starts a run while the transcript still shows what the user typed — a
+skill's whole body is not something to read back. `.note` shows text to the user
+without telling the model, because command feedback is not conversation:
+replaying it would have the model answer for it. `.none` means the host handled
+it entirely.
+
+Custom commands are consulted **before** the built-ins, so replacing `/compact`
+is a matter of registering that name rather than disabling anything. Skills are
+matched last, so a skill cannot shadow `/clear`. `session.availableCommands`
+gives the resolved list for a `/` autocomplete menu, and
+`SlashCommandParser.parse` is public if you want to inspect input yourself — it
+rejects a bare `/` and a leading `//`, since the first is a typo and the second
+is a path.
+
+---
+
 ## The file and shell tools
 
 `SwiftChatKitTools` is the product that ships the file and shell providers.
@@ -860,9 +1111,10 @@ let session = ChatSession(configuration: .init(
 ```
 
 Neither provider takes a directory per call. They follow the session's
-`workingDirectory`, which is pushed to every provider at init and again whenever
-it changes — a model repeating a stale path back at you is a whole class of
-error that not having the parameter removes. `getCurrentDirectory` stays, so the
+`DirectoryScope`, which is pushed to every provider at init and again whenever it
+widens — a model repeating a stale path back at you is a whole class of error
+that not having the parameter removes. The push is awaited before a run starts,
+so a directory set immediately before `send` is in place by the first tool call. `getCurrentDirectory` stays, so the
 model can still report and build absolute paths.
 
 ### The file tools
@@ -907,22 +1159,54 @@ at any depth. `GlobPattern.matches(_:pattern:)` is public if you want it.
 
 ### The shell tool
 
-`ShellToolProvider` exposes a single `runCommand`, macOS-only. It is never
-auto-allowed and always counts as mutating — no shell command is safe enough to
-run unprompted.
+`ShellToolProvider` is macOS-only and exposes four tools:
+
+| Tool | Auto-allowed | Mutating |
+|---|---|---|
+| `runCommand` | no | yes |
+| `startBackgroundProcess` | no | yes |
+| `readProcessLog` | **yes** | no |
+| `killBackgroundProcess` | no | yes |
 
 ```swift
 ShellToolProvider(shell: "/bin/zsh", timeout: 120, outputLimit: 30_000)
 ```
 
-A command past the deadline gets `SIGTERM`, then `SIGKILL` a second later, and
-comes back with `timedOut: true`. Output beyond `outputLimit` keeps the head and
-the tail and drops the middle — a build log's first error and its final summary
-both matter. stdout and stderr are drained concurrently with the wait, so a
-command that fills the 64 KB pipe buffer does not deadlock.
+No shell command is safe enough to run unprompted, so the three that start or
+stop work always prompt. `readProcessLog` is the exception: making the model ask
+permission to look at output the user already approved producing would turn
+following a build into a prompt storm.
+
+A `runCommand` past the deadline gets `SIGTERM`, then `SIGKILL` a second later,
+and comes back with `timedOut: true`. Output beyond `outputLimit` keeps the head
+and the tail and drops the middle — a build log's first error and its final
+summary both matter. stdout and stderr are drained concurrently with the wait,
+so a command that fills the 64 KB pipe buffer does not deadlock.
 
 Non-zero exits are returned as data, not as errors: the model should read the
 exit code and recover, not have the turn fail.
+
+#### Background processes
+
+A timeout is the wrong answer for builds, test suites, servers and watchers, so
+those get a separate path. `startBackgroundProcess` returns a `processId`
+immediately and streams stdout and stderr to a log file; `readProcessLog` pages
+it and reports whether the process is still running. Paging is offset-based —
+the model passes back the previous call's `nextOffset` and reads only what has
+arrived since, which is how it follows a live build without re-reading the whole
+log every poll.
+
+The host can reach the same manager directly:
+
+```swift
+let shell = ShellToolProvider()
+shell.backgroundProcesses          // BackgroundProcessManager — page the same logs in your own UI
+await shell.terminateBackgroundProcesses()
+```
+
+Call `terminateBackgroundProcesses()` when the owning conversation goes away.
+The children belong to the conversation, not to the app, and a closed tab that
+leaves a dev server running is a bug the user finds out about much later.
 
 ---
 

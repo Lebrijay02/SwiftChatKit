@@ -12,6 +12,9 @@ import ChatCore
 public actor LocalFileSystem: FileSystemProviding {
 
     private var root: URL
+    /// Everything the session may reach, `root` included. Paths outside it are
+    /// refused rather than resolved — see `resolveAccessible`.
+    private var scope: DirectoryScope
     /// Whether `root` came from a security-scoped bookmark or an open panel. A
     /// sandboxed host has no access to it outside a start/stop pair, and the
     /// pairs must balance or the app leaks its access allowance.
@@ -31,6 +34,7 @@ public actor LocalFileSystem: FileSystemProviding {
                 securityScoped: Bool = false,
                 excludedNames: Set<String> = LocalFileSystem.defaultExcludedNames) {
         self.root = root
+        self.scope = DirectoryScope(root: root)
         self.securityScoped = securityScoped
         self.excludedNames = excludedNames
     }
@@ -39,7 +43,19 @@ public actor LocalFileSystem: FileSystemProviding {
 
     public func currentDirectory() -> URL { root }
 
-    public func setCurrentDirectory(_ url: URL) { root = url }
+    public func setCurrentDirectory(_ url: URL) {
+        root = url
+        setScope(DirectoryScope(root: url, additional: scope.additional))
+    }
+
+    public func accessibleDirectories() -> [URL] { scope.all }
+
+    /// Widens what the tools may reach. The session drives this; a provider
+    /// never decides for itself that it may see more of the disk.
+    public func setScope(_ scope: DirectoryScope) {
+        self.scope = scope
+        if let newRoot = scope.root { root = newRoot }
+    }
 
     /// Resolves a tool-supplied path. Absolute and `~`-prefixed paths are taken
     /// at face value; everything else hangs off the working directory.
@@ -51,6 +67,22 @@ public actor LocalFileSystem: FileSystemProviding {
         }
         if trimmed.hasPrefix("/") { return URL(fileURLWithPath: trimmed) }
         return root.appendingPathComponent(trimmed)
+    }
+
+    /// `resolve`, then refuses anything outside the scope.
+    ///
+    /// The check is here rather than in the tool provider because `resolve` is
+    /// what turns a relative path into a real one — a provider inspecting the
+    /// raw string could not tell that `../../..` leaves the project, and every
+    /// caller would have to remember to ask.
+    private func resolveAccessible(_ path: String) throws -> URL {
+        let url = resolve(path)
+        guard scope.contains(url) else {
+            throw FileToolError.outsideAccessibleDirectories(
+                path: url.path,
+                allowed: scope.all.map(\.path))
+        }
+        return url
     }
 
     /// Runs `body` inside a balanced security-scoped access pair.
@@ -65,7 +97,7 @@ public actor LocalFileSystem: FileSystemProviding {
     // MARK: - Reading
 
     public func readText(at path: String, offset: Int?, limit: Int?) throws -> String {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         return try withAccess {
             guard fileManager.fileExists(atPath: url.path) else {
                 throw FileToolError.notFound(url.path)
@@ -92,7 +124,7 @@ public actor LocalFileSystem: FileSystemProviding {
     }
 
     public func readData(at path: String) throws -> (data: Data, mimeType: String) {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         return try withAccess {
             guard fileManager.fileExists(atPath: url.path) else {
                 throw FileToolError.notFound(url.path)
@@ -108,7 +140,7 @@ public actor LocalFileSystem: FileSystemProviding {
     }
 
     public func modificationDate(at path: String) throws -> Date? {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         return try withAccess {
             guard fileManager.fileExists(atPath: url.path) else { return nil }
             let values = try url.resourceValues(forKeys: [.contentModificationDateKey])
@@ -119,7 +151,7 @@ public actor LocalFileSystem: FileSystemProviding {
     // MARK: - Writing
 
     public func write(_ contents: String, to path: String) throws {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         try withAccess {
             let parent = url.deletingLastPathComponent()
             if !fileManager.fileExists(atPath: parent.path) {
@@ -130,7 +162,7 @@ public actor LocalFileSystem: FileSystemProviding {
     }
 
     public func edit(path: String, edits: [FileEdit], dryRun: Bool) throws -> String {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         return try withAccess {
             guard fileManager.fileExists(atPath: url.path) else {
                 throw FileToolError.notFound(url.path)
@@ -156,15 +188,15 @@ public actor LocalFileSystem: FileSystemProviding {
     }
 
     public func createDirectory(at path: String) throws {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         try withAccess {
             try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
         }
     }
 
     public func move(from source: String, to destination: String) throws {
-        let sourceURL = resolve(source)
-        let destinationURL = resolve(destination)
+        let sourceURL = try resolveAccessible(source)
+        let destinationURL = try resolveAccessible(destination)
         try withAccess {
             guard fileManager.fileExists(atPath: sourceURL.path) else {
                 throw FileToolError.notFound(sourceURL.path)
@@ -185,7 +217,7 @@ public actor LocalFileSystem: FileSystemProviding {
     // MARK: - Listing
 
     public func list(at path: String, withSizes: Bool, sortBySize: Bool) throws -> String {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         return try withAccess {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
@@ -235,7 +267,7 @@ public actor LocalFileSystem: FileSystemProviding {
     }
 
     public func info(at path: String) throws -> [String: ChatValue] {
-        let url = resolve(path)
+        let url = try resolveAccessible(path)
         return try withAccess {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
@@ -270,7 +302,7 @@ public actor LocalFileSystem: FileSystemProviding {
     // MARK: - Search
 
     public func glob(pattern: String, in path: String?) throws -> [String] {
-        let base = resolve(path ?? "")
+        let base = try resolveAccessible(path ?? "")
         return try withAccess {
             var matches: [(path: String, modified: Date)] = []
             for url in walk(base) {
@@ -291,12 +323,10 @@ public actor LocalFileSystem: FileSystemProviding {
                      filePattern: String?,
                      caseInsensitive: Bool,
                      outputMode: GrepOutputMode) throws -> [String: ChatValue] {
-        let base = resolve(path ?? "")
-
-        // Guard against repo-wide recursive searches without a filter.
-        if (path == nil || path == "." || path == "") && filePattern == nil {
-            throw FileToolError.searchTooBroad
-        }
+        // A nil path means the sandbox root, which is already the scope bound;
+        // cost is capped by the per-file size skip and the match cap below rather
+        // than by refusing unfiltered searches.
+        let base = try resolveAccessible(path ?? "")
 
         let options: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
         guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {

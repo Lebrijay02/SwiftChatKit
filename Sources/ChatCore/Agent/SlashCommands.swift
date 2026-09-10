@@ -41,6 +41,12 @@ public enum SlashCommandAction: Equatable, Sendable {
 
     case setPlanMode(Bool)
     case togglePlanMode
+
+    /// Widen the conversation's reach to `path`, which may be relative to the
+    /// working directory or `~`-prefixed. Resolution and validation are the
+    /// session's, not the command's: a handler has no way to check a path
+    /// against a scope it cannot see.
+    case addDirectory(String)
 }
 
 // MARK: - Command
@@ -54,12 +60,21 @@ public struct SlashCommandContext: Sendable {
     /// The full line as typed, leading slash included.
     public let rawInput: String
     public let workingDirectory: URL?
+    /// Every directory the conversation can reach, `workingDirectory` first.
+    public let directories: [URL]
     public let planMode: Bool
 
-    public init(arguments: String, rawInput: String, workingDirectory: URL?, planMode: Bool) {
+    public init(arguments: String,
+                rawInput: String,
+                workingDirectory: URL?,
+                directories: [URL] = [],
+                planMode: Bool) {
         self.arguments = arguments
         self.rawInput = rawInput
         self.workingDirectory = workingDirectory
+        self.directories = directories.isEmpty
+            ? (workingDirectory.map { [$0] } ?? [])
+            : directories
         self.planMode = planMode
     }
 }
@@ -95,6 +110,7 @@ public struct SlashCommandsConfiguration: Sendable {
         case compact
         case plan
         case newChat = "new"
+        case addDirectory = "add-dir"
         case help
 
         var summary: String {
@@ -103,6 +119,8 @@ public struct SlashCommandsConfiguration: Sendable {
             case .compact: return "Summarize the conversation to free up context"
             case .plan:    return "Toggle plan mode: research and propose before changing anything"
             case .newChat: return "Save this conversation and open a new one"
+            case .addDirectory:
+                return "Give this conversation access to another directory: /add-dir <path>"
             case .help:    return "List the available commands"
             }
         }

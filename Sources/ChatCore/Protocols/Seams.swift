@@ -117,6 +117,15 @@ public protocol FileSystemProviding: Sendable {
     /// Called when the session's working directory changes.
     func setCurrentDirectory(_ url: URL) async
 
+    /// Called when the session's directory scope changes. Paths outside it must
+    /// be refused rather than resolved.
+    ///
+    /// Deliberately not defaulted. A default that fell back to
+    /// `setCurrentDirectory(scope.root)` would compile everywhere and silently
+    /// drop the added directories, which is the one failure this seam exists to
+    /// prevent — an implementation has to say what it does about scope.
+    func setScope(_ scope: DirectoryScope) async
+
     /// Numbered lines, `cat -n` style. `offset` is 0-indexed.
     func readText(at path: String, offset: Int?, limit: Int?) async throws -> String
     func readData(at path: String) async throws -> (data: Data, mimeType: String)
@@ -152,6 +161,7 @@ public protocol FileSystemProviding: Sendable {
 }
 
 public extension FileSystemProviding {
+
 
     /// Identity of last resort. A provider that resolves paths at all should
     /// override this; returning the raw string only makes the staleness check

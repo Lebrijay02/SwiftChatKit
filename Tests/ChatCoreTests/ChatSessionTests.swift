@@ -69,7 +69,13 @@ struct PlainTurnTests {
         #expect(session.isThinking == false, "nothing has been asked yet")
 
         session.send("hi")
-        #expect(await Wait.until { session.isThinking })
+        // Waits for the assistant bubble specifically. `isThinking` goes true
+        // the instant the run starts, which is before the bubble is opened, so
+        // polling on it alone can catch the transcript with the user's own
+        // message still last.
+        #expect(await Wait.until {
+            session.isThinking && session.messages.last?.role == .assistant
+        })
         #expect(session.messages.last?.content.isEmpty == true, "no text yet — hence the indicator")
 
         // The first token replaces the indicator: streaming text is its own.

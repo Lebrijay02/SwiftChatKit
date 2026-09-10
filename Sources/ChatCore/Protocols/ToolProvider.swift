@@ -52,10 +52,13 @@ public protocol ToolProvider: AnyObject, Sendable {
     /// MCP bridge, say — cannot answer this from a static set.
     var mutatingToolNames: Set<String> { get async }
 
-    /// Told when the session's working directory changes, and once at session
-    /// init. Providers that resolve paths or spawn processes need to follow it;
-    /// the default does nothing.
-    func workingDirectoryChanged(to url: URL?) async
+    /// Told which directories the conversation may reach, once at session init
+    /// and again whenever the scope widens. Providers that resolve paths or
+    /// spawn processes need to follow it; the default does nothing.
+    ///
+    /// `scope.root` is the working directory. After the first message it never
+    /// changes again, so a provider only ever sees additions.
+    func directoryScopeChanged(to scope: DirectoryScope) async
 
     /// Bumped when `declarations` changes, so the session knows to rebuild the
     /// model. Constant for providers with a fixed tool list.
@@ -90,7 +93,7 @@ public extension ToolProvider {
 
     var declarationsVersion: Int { get async { 0 } }
 
-    func workingDirectoryChanged(to url: URL?) async {}
+    func directoryScopeChanged(to scope: DirectoryScope) async {}
 }
 
 // MARK: - Generic approval

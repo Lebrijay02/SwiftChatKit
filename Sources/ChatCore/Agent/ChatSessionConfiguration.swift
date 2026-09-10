@@ -35,6 +35,9 @@ public struct ChatSessionConfiguration: Sendable {
     /// against it, and it is persisted with the transcript so reopening a
     /// session doesn't silently retarget the current folder.
     public var workingDirectory: URL?
+    /// Directories beyond `workingDirectory` the session starts out able to
+    /// reach. Kept in step by the session as `/add-dir` widens the scope.
+    public var additionalDirectories: [URL]
 
     public var skills: SkillsConfiguration
 
@@ -112,6 +115,7 @@ public struct ChatSessionConfiguration: Sendable {
                 projectContextTitle: String = "Project instructions",
                 additionalSections: [String] = [],
                 workingDirectory: URL? = nil,
+                additionalDirectories: [URL] = [],
                 skills: SkillsConfiguration = .disabled,
                 slashCommands: SlashCommandsConfiguration = .disabled,
                 context: ContextPolicy = .unbounded,
@@ -146,6 +150,7 @@ public struct ChatSessionConfiguration: Sendable {
         self.projectContextTitle = projectContextTitle
         self.additionalSections = additionalSections
         self.workingDirectory = workingDirectory
+        self.additionalDirectories = additionalDirectories
         self.skills = skills
         self.slashCommands = slashCommands
         self.context = context

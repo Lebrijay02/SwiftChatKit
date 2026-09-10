@@ -178,7 +178,7 @@ struct FileToolProviderApprovalTests {
         let second = try Sandbox(["a.txt": "second"])
         let provider = FileToolProvider(fileSystem: first.fileSystem)
 
-        await provider.workingDirectoryChanged(to: second.root)
+        await provider.directoryScopeChanged(to: DirectoryScope(root: second.root))
         let result = await provider.execute(
             ToolCall(name: FileToolName.readTextFile, arguments: ["path": .string("a.txt")]))
         #expect(result.payload["content"]?.stringValue?.contains("second") == true)

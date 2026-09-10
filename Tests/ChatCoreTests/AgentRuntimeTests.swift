@@ -16,12 +16,14 @@ private func runtimeSession(backend: any ChatBackend,
                             inputPolicy: InFlightInputPolicy = .reject,
                             validators: [any CompletionValidator] = [],
                             transitionTelemetry: (any AgentTransitionTelemetry)? = nil,
+                            fallbackBackend: (any ChatBackend)? = nil,
                             recorder: RunRecorder) -> ChatSession {
     ChatSession(configuration: ChatSessionConfiguration(
         backend: backend,
         toolProviders: providers,
         budget: budget,
         modelRetryPolicy: retry,
+        fallbackBackend: fallbackBackend,
         maximumConcurrentTools: 4,
         inFlightInputPolicy: inputPolicy,
         autoAllowedTools: providers.reduce(into: Set<String>()) {
@@ -47,6 +49,27 @@ struct AgentRuntimeTests {
         #expect(await Wait.runs(recorder))
         #expect(await backend.attempts == 2)
         #expect(session.messages.last?.content == "recovered")
+    }
+
+    @Test("A run that exhausts its retries falls back, then hands the next run back to the primary")
+    func fallbackIsPerRunNotPermanent() async {
+        // Exactly as many failures as the retry policy has attempts, so run one
+        // exhausts them and run two finds the primary healthy again.
+        let primary = FlakyBackend(failedStreams: 2, reply: "primary")
+        let fallback = MockBackend(script: [[.text("fallback"), .finish(.stop)]])
+        let recorder = RunRecorder()
+        let session = runtimeSession(backend: primary,
+                                     fallbackBackend: fallback,
+                                     recorder: recorder)
+
+        session.send("hello")
+        #expect(await Wait.runs(recorder))
+        #expect(session.messages.last?.content == "fallback")
+
+        session.send("again")
+        #expect(await Wait.runs(recorder, count: 2))
+        #expect(session.messages.last?.content == "primary")
+        #expect(await primary.attempts == 3)
     }
 
     @Test("An output limit automatically continues without user input")
@@ -206,6 +229,44 @@ private actor RetryBackend: ChatBackend {
                     continuation.finish(throwing: BackendFailure.connection("offline"))
                 } else {
                     continuation.yield(.text("recovered"))
+                    continuation.yield(.finish(.stop))
+                    continuation.finish()
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func nextAttempt() -> Int {
+        attempts += 1
+        return attempts
+    }
+}
+
+/// Fails its first `failedStreams` attempts with a retryable error, then answers
+/// normally — a backend that recovers between runs rather than within one.
+private actor FlakyBackend: ChatBackend {
+    private let failedStreams: Int
+    private let reply: String
+    private(set) var attempts = 0
+
+    init(failedStreams: Int, reply: String) {
+        self.failedStreams = failedStreams
+        self.reply = reply
+    }
+
+    var history: [ChatTurn] { [] }
+    var modelName: String { "flaky" }
+    func configure(systemInstruction: String, tools: [ToolDeclaration], history: [ChatTurn]) {}
+    func generate(_ prompt: String) async throws -> String { "summary" }
+
+    nonisolated func stream(_ input: TurnInput) -> AsyncThrowingStream<TurnChunk, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                if await nextAttempt() <= failedStreams {
+                    continuation.finish(throwing: BackendFailure.connection("offline"))
+                } else {
+                    continuation.yield(.text(reply))
                     continuation.yield(.finish(.stop))
                     continuation.finish()
                 }

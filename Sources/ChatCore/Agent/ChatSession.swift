@@ -61,16 +61,20 @@ public final class ChatSession {
     public private(set) var sessionID = UUID()
     public private(set) var title = "New chat"
 
-    /// Scope for tool path resolution and skill discovery. Setting it rescans
-    /// project-local skills and marks the model stale.
-    public var workingDirectory: URL? {
-        didSet {
-            guard workingDirectory != oldValue else { return }
-            skills.refresh(workingDirectory: workingDirectory)
-            configuration.workingDirectory = workingDirectory
-            notifyProvidersOfWorkingDirectory()
-        }
-    }
+    /// Where this conversation may reach on disk. Read-only: the root is chosen
+    /// through `setWorkingDirectory` while the transcript is empty and fixed
+    /// afterwards, and directories are added through `addDirectory`.
+    public private(set) var directories = DirectoryScope()
+
+    /// Base for relative paths, shell commands, and the skills scan.
+    public var workingDirectory: URL? { directories.root }
+
+    /// True once the conversation has started, after which the root is fixed.
+    ///
+    /// The transcript is the test rather than a flag, so it survives save and
+    /// reload for free: a restored conversation has messages, and is therefore
+    /// still locked.
+    public var workingDirectoryIsLocked: Bool { !messages.isEmpty }
 
     // MARK: - Sub-services
 
@@ -99,6 +103,18 @@ public final class ChatSession {
     private var deferredToolsChanged = false
     private let createdAt = Date()
 
+    /// The backend displaced by `fallbackBackend`, held so the run can hand the
+    /// session back to it. Nil whenever the primary is the one running.
+    private var displacedPrimaryBackend: (any ChatBackend)?
+
+    /// The in-flight fan-out of a scope change to the tool providers.
+    ///
+    /// Awaited before a run starts. Providers are actors, so telling them is
+    /// asynchronous, and a host that set the directory and immediately sent a
+    /// message would otherwise race the first tool call against a provider that
+    /// still holds the old root.
+    private var directoryPropagation: Task<Void, Never>?
+
     /// Turns replayed ahead of the transcript. Compaction puts the summary here
     /// rather than in `messages`, so the model keeps the thread while the user
     /// sees one tidy note instead of the conversation it replaced.
@@ -113,7 +129,8 @@ public final class ChatSession {
 
     public init(configuration: ChatSessionConfiguration) {
         self.configuration = configuration
-        self.workingDirectory = configuration.workingDirectory
+        self.directories = DirectoryScope(root: configuration.workingDirectory,
+                                          additional: configuration.additionalDirectories)
 
         // Agent bookkeeping tools never prompt: they act on the session's own
         // state, and a confirmation dialog for "update the checklist" is noise.
@@ -128,15 +145,57 @@ public final class ChatSession {
         questions = QuestionService()
         skills = SkillsService(configuration: configuration.skills)
         skills.refresh(workingDirectory: configuration.workingDirectory)
-        notifyProvidersOfWorkingDirectory()
+        notifyProvidersOfDirectoryScope()
     }
 
-    private func notifyProvidersOfWorkingDirectory() {
-        let url = workingDirectory
+    // MARK: - Directories
+
+    /// Points the conversation at `url`. Refused, and returns false, once the
+    /// transcript has anything in it.
+    ///
+    /// Async because it does not return until every provider has the new root:
+    /// the alternative is a host that sets a directory, sends a message, and
+    /// watches the first tool read the previous project.
+    @discardableResult
+    public func setWorkingDirectory(_ url: URL?) async -> Bool {
+        guard !workingDirectoryIsLocked else { return false }
+        guard url?.standardizedFileURL != directories.root else { return true }
+        directories.setRoot(url)
+        skills.refresh(workingDirectory: directories.root)
+        configuration.workingDirectory = directories.root
+        configuration.additionalDirectories = directories.additional
+        notifyProvidersOfDirectoryScope()
+        await directoryPropagation?.value
+        return true
+    }
+
+    /// Widens the conversation's reach. Allowed at any point, including
+    /// mid-conversation: adding a directory cannot change what a path already in
+    /// the transcript resolves to.
+    ///
+    /// Returns false only when the directory was already reachable.
+    @discardableResult
+    public func addDirectory(_ url: URL) async -> Bool {
+        guard directories.add(url) else { return false }
+        configuration.additionalDirectories = directories.additional
+        // The model is told which directories it has, so the prompt it was built
+        // with no longer describes reality.
+        configuredFingerprint = nil
+        notifyProvidersOfDirectoryScope()
+        await directoryPropagation?.value
+        return true
+    }
+
+    private func notifyProvidersOfDirectoryScope() {
+        let scope = directories
         let providers = configuration.toolProviders
-        Task {
+        let previous = directoryPropagation
+        directoryPropagation = Task {
+            // Serialized behind the previous fan-out so two rapid changes cannot
+            // land on a provider out of order.
+            await previous?.value
             for provider in providers {
-                await provider.workingDirectoryChanged(to: url)
+                await provider.directoryScopeChanged(to: scope)
             }
         }
     }
@@ -239,6 +298,7 @@ public final class ChatSession {
         let context = SlashCommandContext(arguments: arguments,
                                           rawInput: rawInput,
                                           workingDirectory: workingDirectory,
+                                          directories: directories.all,
                                           planMode: planMode)
 
         // Host commands first, so registering a name replaces the built-in
@@ -277,6 +337,11 @@ public final class ChatSession {
         case .compact: return .compact
         case .newChat: return .newChat
         case .plan:    return .togglePlanMode
+        case .addDirectory:
+            guard !context.arguments.isEmpty else {
+                return .note("Usage: `/add-dir <path>` — for example `/add-dir ../SharedKit`.")
+            }
+            return .addDirectory(context.arguments)
         case .help:
             let lines = availableCommands
                 .map { "- `/\($0.name)` — \($0.summary)" }
@@ -348,7 +413,42 @@ public final class ChatSession {
         case .togglePlanMode:
             setPlanMode(!planMode)
             messages.append(.note(planModeNote))
+
+        case .addDirectory(let path):
+            Task { [weak self] in await self?.performAddDirectory(path) }
         }
+    }
+
+    /// Resolves, checks, and adds a `/add-dir` argument.
+    ///
+    /// Every outcome ends in a note rather than an `error`: the user typed this
+    /// themselves and is waiting to hear what happened, and a failed directory
+    /// add is not a failed run.
+    private func performAddDirectory(_ path: String) async {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        let url = expanded.hasPrefix("/")
+            ? URL(fileURLWithPath: expanded)
+            : (workingDirectory ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+                .appendingPathComponent(expanded)
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.standardizedFileURL.path,
+                                             isDirectory: &isDirectory) else {
+            messages.append(.note("No such directory: `\(url.standardizedFileURL.path)`"))
+            return
+        }
+        guard isDirectory.boolValue else {
+            messages.append(.note("`\(url.standardizedFileURL.path)` is a file, not a directory."))
+            return
+        }
+
+        guard await addDirectory(url) else {
+            messages.append(.note("Already available: `\(url.standardizedFileURL.path)`"))
+            return
+        }
+        messages.append(.note("Added `\(url.standardizedFileURL.path)` to this conversation."))
+        save()
     }
 
     private var planModeNote: String {
@@ -486,6 +586,14 @@ public final class ChatSession {
         sessionID = UUID()
         title = "New chat"
         configuredFingerprint = nil
+        // The root carries over as the obvious default for the next
+        // conversation — and an empty transcript means it is editable again.
+        // The additions do not: they were widened for the work that just ended.
+        if !directories.additional.isEmpty {
+            directories = DirectoryScope(root: directories.root)
+            configuration.additionalDirectories = []
+            notifyProvidersOfDirectoryScope()
+        }
         historyPrefix = []
         replayStart = 0
     }
@@ -505,8 +613,20 @@ public final class ChatSession {
         // compaction seeded belongs to the session being replaced.
         historyPrefix = []
         replayStart = 0
-        if let path = stored.workingDirectoryPath {
-            workingDirectory = URL(fileURLWithPath: path)
+        // Assigned directly rather than through `setWorkingDirectory`, which
+        // refuses once a transcript exists — and the transcript was just loaded.
+        // A restored conversation comes back locked to the directories it was
+        // working in, which is the point of persisting them.
+        let restored = DirectoryScope(
+            root: stored.workingDirectoryPath.map { URL(fileURLWithPath: $0) } ?? directories.root,
+            additional: (stored.additionalDirectoryPaths ?? []).map { URL(fileURLWithPath: $0) })
+        if restored != directories {
+            directories = restored
+            skills.refresh(workingDirectory: directories.root)
+            configuration.workingDirectory = directories.root
+            configuration.additionalDirectories = directories.additional
+            configuredFingerprint = nil
+            notifyProvidersOfDirectoryScope()
         }
         // Always called, even for a transcript that predates the host having
         // any metadata: the host has to clear the last session's state either
@@ -528,6 +648,7 @@ public final class ChatSession {
             usage: usage,
             workingDirectoryPath: workingDirectory?.path,
             workingDirectoryDisplayName: workingDirectory?.lastPathComponent,
+            additionalDirectoryPaths: directories.additional.map(\.path),
             modelName: nil,
             metadata: configuration.sessionMetadata?())
     }
@@ -581,8 +702,8 @@ public final class ChatSession {
             guard existing == nil else { return }
             configuration.toolProviders.append(provider)
             permissions.addAutoAllowed(provider.autoAllowedToolNames)
-            let url = workingDirectory
-            Task { await provider.workingDirectoryChanged(to: url) }
+            let scope = directories
+            Task { await provider.directoryScopeChanged(to: scope) }
         } else if let existing {
             configuration.toolProviders.remove(at: existing)
         } else {
@@ -657,7 +778,8 @@ public final class ChatSession {
             compressorInstruction: configuration.compressor?.systemInstruction ?? "",
             projectContext: configuration.projectContext,
             projectContextTitle: configuration.projectContextTitle,
-            additionalSections: configuration.additionalSections)
+            additionalSections: configuration.additionalSections,
+            directories: directories.all.map(\.path))
     }
 
     /// Everything the model is built from. Tools that appear and disappear —
@@ -728,6 +850,8 @@ public final class ChatSession {
         var outcome = ChatRunOutcome.completed
         var completionValidationAttempts = 0
 
+        // A directory set moments ago may still be in flight to the providers.
+        await directoryPropagation?.value
         await reconfigureIfNeeded()
 
         agentLoop: while state.turn < configuration.budget.maxTurns {
@@ -888,6 +1012,7 @@ public final class ChatSession {
         isStreaming = false
         modelIsWorking = false
         finalizeStreamingMessages()
+        restorePrimaryBackend()
         if outcome != .completed { configuredFingerprint = nil }
         save()
 
@@ -927,33 +1052,12 @@ public final class ChatSession {
             if Task.isCancelled { throw BackendFailure.cancelled }
             resetAssistantMessage(assistantID, to: originalText)
             var observation = TurnObservation()
-            var earlyStartOpen = configuration.toolHooks.isEmpty
 
             do {
-                let snapshot = try await agentRunner.collect(
-                    from: configuration.backend,
-                    input: input,
-                    onChunk: { [weak self] chunk in
-                        guard let self else { return }
-                        switch chunk {
-                        case .text(let delta):
-                            self.modelIsWorking = false
-                            self.appendText(delta, to: assistantID)
-                        case .toolCall(let call):
-                            guard earlyStartOpen,
-                                  let task = await self.startStreamingToolIfSafe(call) else {
-                                earlyStartOpen = false
-                                break
-                            }
-                            observation.prestartedTools[call.id] = task
-                        case .usage, .finish:
-                            break
-                        }
-                    })
-                observation.calls = snapshot.calls
-                observation.usage = snapshot.usage
-                observation.finish = snapshot.finish
-                guard observation.finish != nil else { throw BackendFailure.incompleteStream }
+                try await collectTurn(from: configuration.backend,
+                                      input: input,
+                                      assistantID: assistantID,
+                                      into: &observation)
                 return observation
             } catch {
                 observation.prestartedTools.values.forEach { $0.cancel() }
@@ -970,41 +1074,100 @@ public final class ChatSession {
         }
 
         if let fallback = configuration.fallbackBackend, lastFailure.isRetryable {
-            configuration.backend = fallback
-            configuredFingerprint = nil
+            switchToFallback(fallback, announcingAbove: assistantID)
             await reconfigureIfNeeded()
             resetAssistantMessage(assistantID, to: originalText)
             await recordTransition(runID: runID, state: state, reason: .modelFallback)
             var observation = TurnObservation()
-            var earlyStartOpen = configuration.toolHooks.isEmpty
-            let snapshot = try await agentRunner.collect(
-                from: fallback,
-                input: input,
-                onChunk: { [weak self] chunk in
-                    guard let self else { return }
-                    switch chunk {
-                    case .text(let delta):
-                        self.modelIsWorking = false
-                        self.appendText(delta, to: assistantID)
-                    case .toolCall(let call):
-                        guard earlyStartOpen,
-                              let task = await self.startStreamingToolIfSafe(call) else {
-                            earlyStartOpen = false
-                            break
-                        }
-                        observation.prestartedTools[call.id] = task
-                    case .usage, .finish:
-                        break
-                    }
-                })
-            observation.calls = snapshot.calls
-            observation.usage = snapshot.usage
-            observation.finish = snapshot.finish
-            guard observation.finish != nil else { throw BackendFailure.incompleteStream }
-            return observation
+            do {
+                try await collectTurn(from: fallback,
+                                      input: input,
+                                      assistantID: assistantID,
+                                      into: &observation)
+                return observation
+            } catch {
+                observation.prestartedTools.values.forEach { $0.cancel() }
+                throw error
+            }
         }
 
         throw lastFailure
+    }
+
+    /// Drains one backend stream into `observation`, appending text to the open
+    /// assistant message and opening streaming tools as their calls arrive.
+    ///
+    /// Reports through `inout` rather than a return value so a throwing stream
+    /// still leaves the caller holding whatever tools were prestarted before the
+    /// failure — they have to be cancelled, and a return would lose them. The
+    /// local copy exists because the chunk closure cannot capture an `inout`.
+    private func collectTurn(from backend: any ChatBackend,
+                             input: TurnInput,
+                             assistantID: UUID,
+                             into observation: inout TurnObservation) async throws {
+        // A `before` hook can deny or rewrite a call, so nothing may start early
+        // while hooks are installed. Once one call has been passed over the rest
+        // must wait too, to keep tools running in the order the model asked for.
+        var earlyStartOpen = configuration.toolHooks.isEmpty
+        var collected = observation
+        defer { observation = collected }
+
+        let snapshot = try await agentRunner.collect(
+            from: backend,
+            input: input,
+            onChunk: { [weak self] chunk in
+                guard let self else { return }
+                switch chunk {
+                case .text(let delta):
+                    self.modelIsWorking = false
+                    self.appendText(delta, to: assistantID)
+                case .toolCall(let call):
+                    guard earlyStartOpen,
+                          let task = await self.startStreamingToolIfSafe(call) else {
+                        earlyStartOpen = false
+                        break
+                    }
+                    collected.prestartedTools[call.id] = task
+                case .usage, .finish:
+                    break
+                }
+            })
+        collected.calls = snapshot.calls
+        collected.usage = snapshot.usage
+        collected.finish = snapshot.finish
+        guard collected.finish != nil else { throw BackendFailure.incompleteStream }
+    }
+
+    /// Hands the rest of this run to `fallback`, remembering the primary so
+    /// `restorePrimaryBackend()` can put it back when the run ends.
+    ///
+    /// The note goes *above* the assistant message being retried, so it reads as
+    /// a header for the answer it explains rather than as a remark trailing it.
+    private func switchToFallback(_ fallback: any ChatBackend, announcingAbove assistantID: UUID) {
+        if displacedPrimaryBackend == nil {
+            displacedPrimaryBackend = configuration.backend
+            let note = ChatMessage.note("Switched to the fallback model for this response.")
+            if let index = messages.firstIndex(where: { $0.id == assistantID }) {
+                messages.insert(note, at: index)
+            } else {
+                messages.append(note)
+            }
+        }
+        configuration.backend = fallback
+        configuredFingerprint = nil
+    }
+
+    /// Returns the session to its primary backend once the run is over.
+    ///
+    /// The fallback covers a blip, not the rest of the session: without this one
+    /// retryable failure silently downgrades every later turn. The primary's own
+    /// history stopped at the failure, so the fingerprint is cleared and the next
+    /// run reconfigures it from the transcript, which is authoritative.
+    private func restorePrimaryBackend() {
+        guard let primary = displacedPrimaryBackend else { return }
+        configuration.backend = primary
+        displacedPrimaryBackend = nil
+        configuredFingerprint = nil
     }
 
     private func validateCompletion(_ state: AgentRunState) async -> CompletionDecision {

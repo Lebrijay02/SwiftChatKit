@@ -84,13 +84,46 @@ struct LocalFileSystemReadTests {
         #expect(mimeType == "application/octet-stream")
     }
 
-    @Test("Absolute paths bypass the working directory")
-    func absolutePath() async throws {
+    @Test("An absolute path inside the scope resolves")
+    func absolutePathInsideScope() async throws {
         let sandbox = try Sandbox(["a.txt": "hi\n"])
-        let other = LocalFileSystem(root: URL(fileURLWithPath: "/nonexistent"))
-        let text = try await other.readText(
+        let text = try await sandbox.fileSystem.readText(
             at: sandbox.root.appendingPathComponent("a.txt").path, offset: nil, limit: nil)
         #expect(text.hasSuffix("hi"))
+    }
+
+    @Test("An absolute path outside the scope is refused")
+    func absolutePathOutsideScope() async throws {
+        let sandbox = try Sandbox(["a.txt": "hi\n"])
+        let other = LocalFileSystem(root: URL(fileURLWithPath: "/nonexistent"))
+        await #expect(throws: FileToolError.self) {
+            try await other.readText(
+                at: sandbox.root.appendingPathComponent("a.txt").path, offset: nil, limit: nil)
+        }
+    }
+
+    @Test("A relative path that climbs out of the root is refused")
+    func relativeEscapeIsRefused() async throws {
+        let sandbox = try Sandbox(["a.txt": "hi\n"])
+        await #expect(throws: FileToolError.self) {
+            try await sandbox.fileSystem.readText(at: "../../../etc/hosts",
+                                                  offset: nil, limit: nil)
+        }
+    }
+
+    @Test("An added directory becomes reachable")
+    func addedDirectoryIsReachable() async throws {
+        let sandbox = try Sandbox(["a.txt": "hi\n"])
+        let other = try Sandbox(["b.txt": "there\n"])
+        // Held in a local: `Sandbox.fileSystem` builds a new actor per access,
+        // so widening one instance and reading through another proves nothing.
+        let fileSystem = sandbox.fileSystem
+        await fileSystem.setScope(
+            DirectoryScope(root: sandbox.root, additional: [other.root]))
+
+        let text = try await fileSystem.readText(
+            at: other.root.appendingPathComponent("b.txt").path, offset: nil, limit: nil)
+        #expect(text.hasSuffix("there"))
     }
 }
 

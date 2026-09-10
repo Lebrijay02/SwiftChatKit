@@ -195,6 +195,13 @@ public struct SystemPromptContext: Sendable, Equatable {
     public var projectContextTitle: String
     /// Host-supplied sections appended last, such as a component catalog.
     public var additionalSections: [String]
+    /// Absolute paths the conversation can reach, working directory first.
+    ///
+    /// The model is told these outright. It resolves relative paths against the
+    /// first one and the file tools refuse anything outside the list, so leaving
+    /// it to infer its own location from whatever paths happen to appear in the
+    /// transcript buys confident guesses and rejected calls.
+    public var directories: [String]
 
     public init(persona: ChatPersona = .default,
                 planMode: Bool = false,
@@ -202,7 +209,8 @@ public struct SystemPromptContext: Sendable, Equatable {
                 compressorInstruction: String = "",
                 projectContext: String = "",
                 projectContextTitle: String = "Project instructions",
-                additionalSections: [String] = []) {
+                additionalSections: [String] = [],
+                directories: [String] = []) {
         self.persona = persona
         self.planMode = planMode
         self.skillsText = skillsText
@@ -210,6 +218,7 @@ public struct SystemPromptContext: Sendable, Equatable {
         self.projectContext = projectContext
         self.projectContextTitle = projectContextTitle
         self.additionalSections = additionalSections
+        self.directories = directories
     }
 }
 
@@ -245,6 +254,25 @@ public enum SystemPromptBuilder {
             instruction += "\n\(context.skillsText)"
         }
 
+        if let root = context.directories.first {
+            instruction += """
+
+
+            # Directories
+            Your working directory is \(root). Relative paths resolve against it.
+            """
+            let extra = context.directories.dropFirst()
+            if !extra.isEmpty {
+                instruction += " You may also read and write under "
+                    + extra.joined(separator: ", ") + "."
+            }
+            instruction += """
+             The file tools refuse any path outside these directories. If you need one that \
+            isn't listed, say so and ask the user to add it with /add-dir — retrying will fail \
+            the same way.
+            """
+        }
+
         for section in context.additionalSections where !section.isEmpty {
             instruction += "\n\n\(section)"
         }
@@ -276,6 +304,7 @@ public enum SystemPromptBuilder {
             String(context.compressorInstruction.hashValue),
             String(context.projectContext.hashValue),
             String(context.additionalSections.joined().hashValue),
+            context.directories.joined(separator: ","),
         ].joined(separator: "|")
     }
 }

@@ -26,6 +26,14 @@ public struct StoredSession: Codable, Identifiable, Equatable, Sendable {
     /// restores its context rather than silently retargeting the current folder.
     public var workingDirectoryPath: String?
     public var workingDirectoryDisplayName: String?
+
+    /// Directories added with `/add-dir` after the root was fixed.
+    ///
+    /// Kept separate from `workingDirectoryPath` rather than folded into one
+    /// list so a transcript written by an older build still decodes, and so the
+    /// root stays identifiable as the root on the way back in.
+    public var additionalDirectoryPaths: [String]?
+
     public var modelName: String?
     /// Host-owned data persisted alongside the transcript. The package never
     /// reads it — it exists so a host doesn't need a second file kept in sync
@@ -43,6 +51,7 @@ public struct StoredSession: Codable, Identifiable, Equatable, Sendable {
                 usage: TokenUsage? = nil,
                 workingDirectoryPath: String? = nil,
                 workingDirectoryDisplayName: String? = nil,
+                additionalDirectoryPaths: [String]? = nil,
                 modelName: String? = nil,
                 metadata: [String: ChatValue]? = nil) {
         self.id = id
@@ -53,6 +62,7 @@ public struct StoredSession: Codable, Identifiable, Equatable, Sendable {
         self.usage = usage
         self.workingDirectoryPath = workingDirectoryPath
         self.workingDirectoryDisplayName = workingDirectoryDisplayName
+        self.additionalDirectoryPaths = additionalDirectoryPaths
         self.modelName = modelName
         self.metadata = metadata
     }

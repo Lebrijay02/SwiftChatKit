@@ -155,9 +155,11 @@ public final class ShellToolProvider: ToolProvider {
         Self.allDeclarations.contains { $0.name == name }
     }
 
-    public func workingDirectoryChanged(to url: URL?) async {
-        await runner.setWorkingDirectory(url)
-        await background.setWorkingDirectory(url)
+    public func directoryScopeChanged(to scope: DirectoryScope) async {
+        // Only the root matters here: a shell command runs *in* one directory,
+        // and the additions widen what may be read, not where `cd` starts.
+        await runner.setWorkingDirectory(scope.root)
+        await background.setWorkingDirectory(scope.root)
     }
 
     public func approvalCard(for call: ToolCall) async -> PermissionRequest? {
